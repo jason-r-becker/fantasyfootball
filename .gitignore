@@ -1,0 +1,35 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+.envrc
+.netrc
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+*credentials*.json
+*secrets*.json
+*.local.json
+
+# League settings, rankings, draft state, and historical data are private.
+# Share required league files directly; never commit them.
+data/
+
+# Local tooling
+.idea/
+.vscode/
+.ipynb_checkpoints/
+.venv/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.draft_app.*.json
+practice_live_draft.csv

@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantasyfootball"
+version = "1.0.0"
+readme = "readme.md"
+description = "Project for doing fantasy football analysis and predictions."
+requires-python = ">= 3.12"
+authors = [{ name = "Jason Becker" }]
+license = { text = "MIT" }
+dependencies = [
+    "espn-api",
+    "fuzzywuzzy",
+    "joblib",
+    "lxml",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "python-Levenshtein",
+    "requests",
+    "seaborn",
+    "statsmodels",
+    "tabulate",
+    "tqdm"
+]
+
+[project.scripts]
+fantasy-draft = "fantasyfootball.draft_app:main"
+
+[project.optional-dependencies]
+dev = ["ipdb", "ipykernel", "ipython", "ipywidgets", "pip", "pytest", "ruff"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fantasyfootball"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/fantasyfootball",
+    "docs",
+    "examples",
+    "readme.md",
+    "pyproject.toml",
+]
+
+[tool.ruff]
+src = ["src"]
+line-length = 79
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+
+# -------------------------------------------------------------------
+# Ruff Lint Configuration
+#   E    - pycodestyle errors: indentation, whitespace, syntax/layout issues
+#   F    - pyflakes: unused imports/variables, undefined names
+#   W    - pycodestyle warnings: blank lines, spacing, formatting
+#   I    - isort: enforces consistent import ordering and grouping
+#   B    - flake8-bugbear: flags likely bugs and common Python footguns
+# -------------------------------------------------------------------
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.uv.workspace]
+members = [
+    "fantasyfootball",
+]

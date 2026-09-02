@@ -1,0 +1,16 @@
+{
+  "teams": 12,
+  "positions": {
+    "QB": 1,
+    "RB": 2,
+    "WR": 2,
+    "TE": 1,
+    "FLEX": 1
+  },
+  "draft_rounds": 15,
+  "draft_slot": 1,
+  "site": "Sleeper",
+  "user_id": "REPLACE_WITH_SLEEPER_USER_ID",
+  "league_id": "REPLACE_WITH_SLEEPER_LEAGUE_ID",
+  "draft_id": "REPLACE_WITH_SLEEPER_DRAFT_ID"
+}

@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Draft Room</title>
+    <link rel="stylesheet" href="/draft.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">FF</div>
+        <div>
+          <p class="eyebrow">Draft command center</p>
+          <h1 id="league-title">Loading draft…</h1>
+        </div>
+      </div>
+      <div class="status-cluster">
+        <span id="mode-badge" class="badge"></span>
+        <span id="sync-badge" class="status-dot">Checking sync</span>
+      </div>
+    </header>
+
+    <section class="command-deck" aria-label="Persistent draft controls">
+      <div class="deck-clock">
+        <p class="label">Live pick</p>
+        <div class="clock-line">
+          <strong id="pick-number">—</strong>
+          <span id="round-label">Round —</span>
+        </div>
+        <div id="next-pick" class="turn-counter" aria-live="polite">
+          <strong id="picks-away-number">—</strong>
+          <span id="picks-away-label">Calculating picks until your turn…</span>
+        </div>
+      </div>
+      <div class="deck-recommendation">
+        <p class="label">Optimizer lead</p>
+        <strong id="deck-lead">Calculating…</strong>
+        <span id="deck-lead-detail">Projected team plan loads automatically</span>
+      </div>
+      <div class="deck-manual">
+        <label for="manual-player">Mark player taken</label>
+        <div class="deck-input-row">
+          <input id="manual-player" list="player-options" placeholder="Player name">
+          <datalist id="player-options"></datalist>
+          <label class="mine-toggle"><input id="manual-mine" type="checkbox"> Mine</label>
+          <button id="manual-submit" class="button button-primary">Mark taken</button>
+          <button class="button untracked-button" data-untracked="K" title="Advance one pick without finding the kicker">+ K</button>
+          <button class="button untracked-button" data-untracked="DST" title="Advance one pick without finding the defense">+ D/ST</button>
+        </div>
+      </div>
+      <div class="deck-actions">
+        <button id="sync-button" class="button button-secondary">Sync now</button>
+        <button id="optimize-button" class="button button-secondary">Optimize</button>
+        <button id="board-open" class="button board-open-button" aria-expanded="false">Open board <span id="board-count">—</span></button>
+      </div>
+    </section>
+
+    <main>
+      <section class="scoreboard">
+        <div id="outlook" class="outlook-grid"></div>
+      </section>
+
+      <section class="control-grid">
+        <section class="panel optimizer-panel">
+          <div class="panel-heading compact no-pad">
+            <div><p class="eyebrow">Terminal optimizer</p><h2>Projected team plan</h2></div>
+            <span id="optimizer-profile" class="optimizer-profile">Own picks auto · not run yet</span>
+          </div>
+          <p id="optimizer-status" class="hint">Runs automatically when you are on the clock, or manually whenever you want a preview.</p>
+          <div id="excluded-list" class="excluded-list"></div>
+          <div id="plan-tabs" class="plan-tabs"></div>
+          <div id="optimizer-results" class="optimizer-results empty">No projection yet</div>
+        </section>
+
+        <section class="panel roster-panel">
+          <div class="panel-heading compact no-pad">
+            <div><p class="eyebrow">Your team</p><h2>Roster</h2></div>
+            <span id="roster-count" class="count">0</span>
+          </div>
+          <div id="roster" class="roster-list empty">No players yet</div>
+        </section>
+      </section>
+
+      <section class="panel league-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Live opponent scouting</p>
+            <h2>League strength</h2>
+          </div>
+          <span id="league-strength-status" class="optimizer-profile">Waiting for round 4</span>
+        </div>
+        <p class="league-strength-explainer">Forecasts every remaining pick and ranks completed lineups by projected points per game. Each value compares that starter with the other 11 at the same lineup tier—RB1 and RB2 are separate. Future names stay hidden.</p>
+        <div id="league-strength" class="league-strength-grid empty">Loads automatically in fast optimizer mode.</div>
+      </section>
+
+      <section class="panel chart-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Position value over replacement</p>
+            <h2>Drop-off chart</h2>
+          </div>
+          <p id="chart-recommendation" class="chart-recommendation">Loading analysis…</p>
+        </div>
+        <details class="chart-settings">
+          <summary>Chart settings</summary>
+          <div class="chart-settings-grid">
+            <label>Y-axis metric<select id="chart-metric"></select></label>
+            <label>Y minimum<input id="chart-y-min" type="number" step="any" placeholder="Auto"></label>
+            <label>Y maximum<input id="chart-y-max" type="number" step="any" placeholder="Auto"></label>
+            <label>Position ranks<input id="chart-rank-limit" type="number" min="3" max="60" value="18"></label>
+            <button id="chart-apply" class="button button-primary">Apply</button>
+            <button id="chart-reset" class="button button-secondary">Reset</button>
+          </div>
+        </details>
+        <div id="chart-legend" class="chart-legend"></div>
+        <div class="chart-wrap"><svg id="dropoff-chart" viewBox="0 0 940 330" role="img" aria-label="Position value drop-off chart"></svg></div>
+      </section>
+
+      <section class="support-grid">
+        <section class="panel log-panel">
+          <div class="panel-heading compact no-pad">
+            <div><p class="eyebrow">Latest activity</p><h2>Draft log</h2></div>
+            <span id="pick-count" class="count">0</span>
+          </div>
+          <div id="draft-log" class="draft-log empty">Waiting for pick 1</div>
+        </section>
+
+        <section class="panel safety-panel">
+          <p class="eyebrow">API safety net</p>
+          <h2>Spreadsheet fallback</h2>
+          <p class="path-label">Available-player file (rows removed live)</p>
+          <p id="workbook-path" class="path"></p>
+          <p class="path-label">Drafted-player log (rows added live)</p>
+          <p id="drafted-path" class="path"></p>
+          <div class="button-row">
+            <a class="button button-secondary" href="/api/export">Available CSV</a>
+            <a class="button button-secondary" href="/api/drafted/export">Drafted CSV</a>
+            <button id="sheet-refresh" class="button button-secondary">Refresh deletions</button>
+          </div>
+          <button id="reset-practice" class="text-button">Reset practice draft</button>
+          <p class="hint">Delete drafted-player rows in Excel as before, then refresh those deletions into this companion.</p>
+        </section>
+      </section>
+
+    </main>
+
+    <div id="board-overlay" class="board-overlay"></div>
+    <aside id="board-drawer" class="board-drawer" aria-label="Available player big board" aria-hidden="true">
+      <div class="drawer-heading">
+        <div><p class="eyebrow">Available players</p><h2>Big board</h2><span id="board-summary" class="summary-meta">Loading…</span></div>
+        <button id="board-close" class="drawer-close" aria-label="Close big board">×</button>
+      </div>
+      <div class="drawer-controls">
+        <label class="search-wrap">
+          <span class="sr-only">Search players</span>
+          <input id="search" type="search" placeholder="Search player or team">
+        </label>
+        <label class="optimizer-metric">
+          <span>Optimizer &amp; board metric</span>
+          <select id="metric" aria-label="Optimizer and big board ranking metric"></select>
+        </label>
+      </div>
+        <div id="position-filters" class="filter-tabs" role="group" aria-label="Position filter">
+          <button class="active" data-position="ALL">All</button>
+          <button data-position="QB">QB</button>
+          <button data-position="RB">RB</button>
+          <button data-position="WR">WR</button>
+          <button data-position="TE">TE</button>
+          <button data-position="FLEX">FLEX</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Player</th><th>Pos</th><th>Bye</th><th>ADP</th><th id="metric-heading">Value</th><th></th></tr>
+            </thead>
+            <tbody id="players"></tbody>
+          </table>
+        </div>
+    </aside>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/draft.js"></script>
+  </body>
+</html>
