@@ -41,6 +41,7 @@ uv run ruff check src/fantasyfootball/draft_app.py \
   src/fantasyfootball/draft_sources.py \
   src/fantasyfootball/draft_analysis.py \
   tests/test_draft_app.py \
+  tests/test_draft_sources.py \
   tests/test_draft_state.py \
   tests/test_projection_script.py
 uv run ruff format --check src/fantasyfootball/draft_app.py \
@@ -48,6 +49,7 @@ uv run ruff format --check src/fantasyfootball/draft_app.py \
   src/fantasyfootball/draft_sources.py \
   src/fantasyfootball/draft_analysis.py \
   tests/test_draft_app.py \
+  tests/test_draft_sources.py \
   tests/test_draft_state.py \
   tests/test_projection_script.py
 node --check src/fantasyfootball/web/draft.js
@@ -84,6 +86,7 @@ Before merging documentation:
 
    ```bash
    uv run python -m json.tool examples/sleeper-config.example.json >/dev/null
+   uv run python -m json.tool examples/espn-config.example.json >/dev/null
    ```
 
 4. Compare `uv run fantasy-draft --help` with every documented flag and

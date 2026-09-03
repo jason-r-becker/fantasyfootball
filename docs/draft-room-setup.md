@@ -40,10 +40,11 @@ data/
 These files may be supplied by a rankings preparer, or most can be built using
 the repository:
 
-- Copy and complete
-  [`examples/sleeper-config.example.json`](../examples/sleeper-config.example.json)
-  for `config.json`. The interactive cleaner can create a smaller config, but
-  it does not ask for platform IDs, draft rounds, or draft slot.
+- Copy and complete the
+  [Sleeper example](../examples/sleeper-config.example.json) or
+  [ESPN example](../examples/espn-config.example.json) for `config.json`. The
+  interactive cleaner can create a smaller config, but it does not ask for
+  platform IDs, draft rounds, or draft slot.
 - Generate `raw.csv` with the R projection script when a season
   `scoring_profiles.json` is available.
 - Obtain `adp.csv` separately.

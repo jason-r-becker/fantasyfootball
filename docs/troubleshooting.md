@@ -20,9 +20,10 @@ follow [Data preparation](data-preparation.md).
 
 ### `Draft slot is missing` or `Draft slot must be between ...`
 
-Sleeper may not have published the order yet, or the private config still has a
-placeholder. Once published, set `draft_slot` to an integer from 1 through
-`teams`, or pass `--pick NUMBER`. Never infer the slot from last season.
+The platform may not have published the order yet, or the private config still
+has a placeholder. Once published, set `draft_slot` to an integer from 1
+through `teams`, or pass `--pick NUMBER`. An ESPN `team_id` is not a draft slot.
+Never infer the slot from last season.
 
 ### `Invalid or empty draft rankings`
 
@@ -53,6 +54,17 @@ against [Configuration reference](configuration.md).
 The selected config has no `draft_id`. Do not substitute `league_id`; retrieve
 the exact draft ID for the selected season through Sleeper's league-drafts
 endpoint.
+
+### `ESPN draft API request failed`
+
+Confirm the year and `league_id`. A private league also needs current `swid`
+and `espn_s2` cookies copied from a browser session signed in to an account that
+can open the league. The displayed error is intentionally generic so an
+upstream authentication response cannot expose either cookie.
+
+The first successful sync containing picks also loads ESPN's season player
+directory. Later syncs during the same app process reuse that map and request
+only the draft detail.
 
 ### API offline or request failed
 

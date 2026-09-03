@@ -1,0 +1,17 @@
+{
+  "teams": 12,
+  "positions": {
+    "QB": 1,
+    "RB": 2,
+    "WR": 2,
+    "TE": 1,
+    "FLEX": 1
+  },
+  "draft_rounds": null,
+  "draft_slot": null,
+  "site": "ESPN",
+  "league_id": "REPLACE_WITH_ESPN_LEAGUE_ID",
+  "team_id": null,
+  "swid": "",
+  "espn_s2": ""
+}

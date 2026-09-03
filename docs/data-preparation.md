@@ -69,7 +69,8 @@ directory:
 - `adp.csv` — FantasyPros export with `player`, `pos`, `bye`, `avg`, and a
   column named for the configured site, such as `sleeper`.
 - `config.json` — at least `teams`, `positions`, and `site`, plus draft-room
-  settings described in [Configuration reference](configuration.md).
+  settings described in [Configuration reference](configuration.md). Start
+  from the matching platform example in `examples/`.
 
 From the repository root, run:
 

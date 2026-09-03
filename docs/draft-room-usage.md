@@ -28,6 +28,11 @@ The app reads `config.json` and immutable rankings from `clean.csv`. It then:
 4. imports deletions or restorations already present in that mode's working CSV;
 5. rewrites the working CSV and chronological pick log from current state.
 
+On the first ESPN synchronization that contains picks, the app downloads the
+season player-name map once. Later synchronization requests in the same process
+fetch only the current draft detail. Restarting the app clears this memory-only
+cache.
+
 Because an existing working CSV is read on startup, close spreadsheet editors
 cleanly and inspect unexpected row deletions before continuing.
 
