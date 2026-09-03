@@ -30,16 +30,19 @@ dependencies = [
 fantasy-draft = "fantasyfootball.draft_app:main"
 
 [project.optional-dependencies]
-dev = ["ipdb", "ipykernel", "ipython", "ipywidgets", "pip", "pytest", "ruff"]
+dev = ["pip", "pytest", "ruff"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fantasyfootball"]
 
 [tool.hatch.build.targets.sdist]
 include = [
+    ".env.example",
     "src/fantasyfootball",
     "docs",
     "examples",
+    "scripts",
+    "setup.sh",
     "readme.md",
     "pyproject.toml",
 ]
