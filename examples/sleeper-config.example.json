@@ -8,7 +8,7 @@
     "FLEX": 1
   },
   "draft_rounds": 15,
-  "draft_slot": 1,
+  "draft_slot": null,
   "site": "Sleeper",
   "user_id": "REPLACE_WITH_SLEEPER_USER_ID",
   "league_id": "REPLACE_WITH_SLEEPER_LEAGUE_ID",
