@@ -132,7 +132,9 @@ class DraftSession:
         )
         self._lock = RLock()
         self.config = self._read_config()
-        configured_rounds = self.config.get("draft_rounds", 15)
+        configured_rounds = self.config.get("draft_rounds")
+        if configured_rounds is None:
+            configured_rounds = 15
         self.rounds = int(configured_rounds if rounds is None else rounds)
         if self.rounds < 1:
             raise DraftError("Draft rounds must be at least 1.")
@@ -181,7 +183,7 @@ class DraftSession:
         try:
             with aliases_path.open(encoding="utf-8") as stream:
                 aliases = json.load(stream)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except FileNotFoundError, json.JSONDecodeError, OSError:
             return 0
         if not isinstance(aliases, dict):
             return 0
@@ -207,7 +209,7 @@ class DraftSession:
         adp_path = self.paths.league / "adp.csv"
         try:
             adp = pd.read_csv(adp_path, engine="python", on_bad_lines="skip")
-        except (FileNotFoundError, pd.errors.ParserError):
+        except FileNotFoundError, pd.errors.ParserError:
             return 0
         columns = {str(column).lower(): column for column in adp.columns}
         if "player" not in columns or "avg" not in columns:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from threading import Lock
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -10,6 +11,9 @@ from urllib.request import Request, urlopen
 from espn_api.football import League
 
 from fantasyfootball.draft_state import DraftError, normalize_position
+
+_ESPN_PLAYER_MAPS: dict[int, dict[int, str]] = {}
+_ESPN_PLAYER_MAPS_LOCK = Lock()
 
 
 def _request_json(url: str, timeout: float = 8.0) -> Any:
@@ -101,9 +105,12 @@ def parse_espn_picks(
     player_map: dict[int, str],
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    raw_picks = payload.get("draftDetail", {}).get("picks", [])
+    raw_picks = (payload.get("draftDetail") or {}).get("picks") or []
     teams = int(config["teams"])
-    my_team_id = int(config.get("team_id", -1))
+    configured_team_id = config.get("team_id")
+    my_team_id = (
+        int(configured_team_id) if configured_team_id not in (None, "") else -1
+    )
     picks = []
     for raw in raw_picks:
         player_id = int(raw.get("playerId", -1))
@@ -131,6 +138,25 @@ def parse_espn_picks(
     return picks
 
 
+def _espn_player_map(league: League, year: int) -> dict[int, str]:
+    """Load ESPN's season player names once without caching credentials."""
+    with _ESPN_PLAYER_MAPS_LOCK:
+        cached = _ESPN_PLAYER_MAPS.get(year)
+    if cached is not None:
+        return cached
+
+    players = league.espn_request.get_pro_players()
+    if not isinstance(players, list):
+        raise ValueError("ESPN returned an unexpected player response")
+    player_map = {
+        int(player["id"]): str(player["fullName"])
+        for player in players
+        if player.get("id") is not None and player.get("fullName")
+    }
+    with _ESPN_PLAYER_MAPS_LOCK:
+        return _ESPN_PLAYER_MAPS.setdefault(year, player_map)
+
+
 def fetch_espn_picks(
     config: dict[str, Any], year: int
 ) -> list[dict[str, Any]]:
@@ -142,11 +168,19 @@ def fetch_espn_picks(
             year=year,
             swid=config.get("swid"),
             espn_s2=config.get("espn_s2"),
+            fetch_league=False,
         )
         payload = league.espn_request.get_league_draft()
+        if not isinstance(payload, dict):
+            raise ValueError("ESPN returned an unexpected draft response")
+        raw_picks = (payload.get("draftDetail") or {}).get("picks", [])
+        player_map = _espn_player_map(league, year) if raw_picks else {}
     except Exception as error:
-        raise DraftError(f"ESPN draft API request failed: {error}") from error
-    return parse_espn_picks(payload, league.player_map, config)
+        raise DraftError(
+            "ESPN draft API request failed. Check the league ID, season, "
+            "and private-league cookies."
+        ) from error
+    return parse_espn_picks(payload, player_map, config)
 
 
 def fetch_platform_picks(

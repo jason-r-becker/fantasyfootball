@@ -149,6 +149,18 @@ def test_config_rounds_and_manual_k_dst_fallback(tmp_path):
     assert [pick["position"] for pick in restored.picks] == ["K", "DST"]
 
 
+def test_null_config_rounds_uses_default(tmp_path):
+    league = make_league(tmp_path)
+    config_path = league / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["draft_rounds"] = None
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    session = DraftSession(tmp_path, 2026, "test", 1)
+
+    assert session.rounds == 15
+
+
 def test_completed_draft_is_never_reported_on_the_clock(tmp_path):
     make_league(tmp_path, draft_rounds=1)
     session = DraftSession(tmp_path, 2026, "test", 1)
