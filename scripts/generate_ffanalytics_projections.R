@@ -5,6 +5,37 @@
 # scored locally for every league in data/<year>/scoring_profiles.json.
 
 args <- commandArgs(trailingOnly = TRUE)
+
+usage <- paste(
+  "Usage: Rscript scripts/generate_ffanalytics_projections.R [options]",
+  "",
+  "Options:",
+  "  --year=YEAR        Season year (defaults to the current year)",
+  "  --sources=A,B,...  Projection sources (defaults to CBS, ESPN,",
+  "                     FantasyPros, and FFToday)",
+  "  --refresh          Discard the matching package cache and scrape again",
+  "  -h, --help         Show this help and exit",
+  sep = "\n"
+)
+
+if (any(args %in% c("-h", "--help"))) {
+  cat(usage, "\n")
+  quit(save = "no", status = 0)
+}
+
+known_args <- args %in% "--refresh" |
+  grepl("^--year=", args) |
+  grepl("^--sources=", args)
+if (any(!known_args)) {
+  stop(
+    "Unknown argument(s): ",
+    paste(args[!known_args], collapse = ", "),
+    "\n",
+    usage,
+    call. = FALSE
+  )
+}
+
 script_arg <- grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
 if (length(script_arg) != 1L) {
   stop("Could not determine this script's path")
