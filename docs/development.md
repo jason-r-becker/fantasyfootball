@@ -2,7 +2,7 @@
 
 ## Environment
 
-The project requires Python 3.12 or newer and uses uv for locking, environments,
+The project requires Python 3.14 or newer and uses uv for locking, environments,
 commands, and builds.
 
 ```bash

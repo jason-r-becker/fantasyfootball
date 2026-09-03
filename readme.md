@@ -9,7 +9,7 @@ never submits a pick to either platform.
 ## Install
 
 Requirements: Git, [uv](https://docs.astral.sh/uv/getting-started/installation/),
-and Python 3.12 or newer (uv can install the required Python version).
+and Python 3.14 or newer (uv can install the required Python version).
 
 ```bash
 git clone https://github.com/jason-r-becker/fantasyfootball.git

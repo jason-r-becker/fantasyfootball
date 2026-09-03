@@ -136,6 +136,6 @@ the displayed log with the platform before making corrections.
 
 ## Installation and contributor checks
 
-If `uv` cannot resolve or run the environment, confirm Python 3.12+ support and
+If `uv` cannot resolve or run the environment, confirm Python 3.14+ support and
 rerun `uv sync`. Developers should use `./setup.sh`. For the complete validation
 commands, see [Development and validation](development.md).
