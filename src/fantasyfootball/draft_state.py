@@ -6,7 +6,6 @@ import json
 import os
 import re
 import tempfile
-import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +13,19 @@ from threading import RLock
 from typing import Any
 
 import pandas as pd
+
+from fantasyfootball.adp_model import (
+    ADPModelError,
+    PlayerDraftDistribution,
+    load_adp_model,
+)
+from fantasyfootball.player_matching import (
+    PlayerMatcher,
+    PlayerMatchError,
+    load_player_aliases,
+    normalize_player_name,
+    normalize_position,
+)
 
 DISPLAY_COLUMNS = [
     "Player",
@@ -36,25 +48,6 @@ OPTIMIZER_AUTO_THRESHOLD_MS = 500
 
 class DraftError(Exception):
     """An expected, user-facing draft operation error."""
-
-
-def normalize_player_name(value: str) -> str:
-    """Normalize source differences without guessing at player identity."""
-    value = unicodedata.normalize("NFKD", value or "")
-    value = "".join(
-        character
-        for character in value
-        if not unicodedata.combining(character)
-    )
-    value = value.replace("’", "'").lower()
-    value = re.sub(r"\b(jr|sr|ii|iii|iv)\.?\b", "", value)
-    return re.sub(r"[^a-z0-9]+", "", value)
-
-
-def normalize_position(value: str | None) -> str:
-    """Normalize platform defense labels to the draft room's DST label."""
-    position = str(value or "").upper().replace("/", "")
-    return "DST" if position in {"DEF", "DST"} else position
 
 
 def _now() -> str:
@@ -146,6 +139,19 @@ class DraftSession:
             )
         self.draft_slot = int(resolved_slot)
         self.teams = int(self.config["teams"])
+        configured_flex = self.config.get("flex_positions", ["RB", "WR"])
+        if not isinstance(configured_flex, list) or not configured_flex:
+            raise DraftError("flex_positions must be a non-empty JSON array.")
+        self.flex_positions = tuple(
+            dict.fromkeys(
+                normalize_position(position) for position in configured_flex
+            )
+        )
+        invalid_flex = set(self.flex_positions) - {"QB", "RB", "WR", "TE"}
+        if invalid_flex:
+            raise DraftError(
+                "flex_positions may contain only QB, RB, WR, and TE."
+            )
         if not 1 <= self.draft_slot <= self.teams:
             raise DraftError(
                 f"Draft slot must be between 1 and {self.teams} for {league}."
@@ -157,12 +163,23 @@ class DraftSession:
             raise DraftError(
                 f"Invalid or empty draft rankings: {self.paths.clean}"
             )
-        self.adp_fallback_count = self._fill_missing_adp()
-        self._names = {
-            normalize_player_name(str(player)): str(player)
-            for player in self.full_df["Player"]
-        }
-        self.alias_count = self._load_player_aliases()
+        aliases_path = self.paths.league.parent / "source_player_map.json"
+        try:
+            aliases = load_player_aliases(aliases_path)
+            self._player_matcher = PlayerMatcher(
+                self.full_df.to_dict("records"), aliases
+            )
+        except PlayerMatchError as error:
+            raise DraftError(str(error)) from error
+        self.alias_count = self._player_matcher.alias_count
+        try:
+            self.adp_model = load_adp_model(
+                self.config, self.year, self.paths.league
+            )
+        except ADPModelError as error:
+            raise DraftError(str(error)) from error
+        self._adp_distributions = self._match_adp_distributions()
+        self.adp_refresh_count = self._apply_adp_model()
         self._positions = {
             normalize_player_name(str(row["Player"])): str(row["Position"])
             for _, row in self.full_df.iterrows()
@@ -172,62 +189,64 @@ class DraftSession:
             self.refresh_from_spreadsheet()
         else:
             self._write_workbook()
-        # Keep fallback ADP values and column structure current even when the
+        # Keep refreshed FFC values and column structure current even when the
         # spreadsheet had no manual row changes to import.
         self._write_workbook()
         self._write_drafted_players()
 
-    def _load_player_aliases(self) -> int:
-        """Add confirmed season name aliases without overriding exact names."""
-        aliases_path = self.paths.league.parent / "source_player_map.json"
-        try:
-            with aliases_path.open(encoding="utf-8") as stream:
-                aliases = json.load(stream)
-        except FileNotFoundError, json.JSONDecodeError, OSError:
-            return 0
-        if not isinstance(aliases, dict):
-            return 0
-        added = 0
-        for source, target in aliases.items():
-            canonical = self._names.get(normalize_player_name(str(target)))
-            alias = normalize_player_name(str(source))
-            looks_like_player = len(str(source).split()) >= 2
-            if (
-                canonical
-                and alias
-                and looks_like_player
-                and alias not in self._names
-            ):
-                self._names[alias] = canonical
-                added += 1
-        return added
-
-    def _fill_missing_adp(self) -> int:
-        """Use consensus ADP when the configured platform has no value."""
-        if "ADP" not in self.full_df or not self.full_df["ADP"].isna().any():
-            return 0
-        adp_path = self.paths.league / "adp.csv"
-        try:
-            adp = pd.read_csv(adp_path, engine="python", on_bad_lines="skip")
-        except FileNotFoundError, pd.errors.ParserError:
-            return 0
-        columns = {str(column).lower(): column for column in adp.columns}
-        if "player" not in columns or "avg" not in columns:
-            return 0
-        consensus = {
-            normalize_player_name(str(row[columns["player"]])): pd.to_numeric(
-                row[columns["avg"]], errors="coerce"
+    def _match_adp_distributions(
+        self,
+    ) -> dict[str, PlayerDraftDistribution]:
+        """Match FFC names through the same confirmed alias table as picks."""
+        matched = {}
+        for distribution in self.adp_model.players:
+            result = self._player_matcher.match(
+                distribution.name,
+                position=distribution.position,
+                team=distribution.team,
             )
-            for _, row in adp.iterrows()
-        }
-        missing = self.full_df["ADP"].isna()
-        fallback = self.full_df.loc[missing, "Player"].map(
-            lambda player: consensus.get(normalize_player_name(str(player)))
-        )
-        valid = fallback.notna()
-        if valid.any():
-            self.full_df.loc[fallback.index[valid], "ADP"] = fallback[valid]
-        return int(valid.sum())
+            if result.canonical:
+                key = normalize_player_name(result.canonical)
+                if key in matched:
+                    raise DraftError(
+                        "Multiple FFC players matched the same ranked player: "
+                        f"{result.canonical}."
+                    )
+                matched[key] = distribution
+        return matched
+
+    def adp_distribution(self, player: str) -> PlayerDraftDistribution | None:
+        """Return the configured draft-position model for a ranked player."""
+        return self._adp_distributions.get(normalize_player_name(player))
+
+    def _apply_adp_model(self) -> int:
+        """Refresh displayed ADP and bye values from matched FFC players."""
+        for column in (
+            "ADP",
+            "Bye",
+            "ADP Source",
+            "ADP Std Dev",
+            "ADP Samples",
+            "ADP Earliest",
+            "ADP Latest",
+        ):
+            if column not in self.full_df:
+                self.full_df[column] = pd.NA
+        refreshed = 0
+        for index, row in self.full_df.iterrows():
+            distribution = self.adp_distribution(str(row["Player"]))
+            if distribution is None:
+                continue
+            self.full_df.at[index, "ADP"] = distribution.mean
+            if distribution.bye is not None:
+                self.full_df.at[index, "Bye"] = distribution.bye
+            self.full_df.at[index, "ADP Source"] = "FFC"
+            self.full_df.at[index, "ADP Std Dev"] = distribution.stdev
+            self.full_df.at[index, "ADP Samples"] = distribution.samples
+            self.full_df.at[index, "ADP Earliest"] = distribution.earliest
+            self.full_df.at[index, "ADP Latest"] = distribution.latest
+            refreshed += 1
+        return refreshed
 
     def _read_config(self) -> dict[str, Any]:
         config_path = self.paths.league / "config.json"
@@ -418,8 +437,16 @@ class DraftSession:
         )
         return owner_slot == self.draft_slot
 
-    def _canonical_name(self, player: str) -> str | None:
-        return self._names.get(normalize_player_name(player))
+    def _canonical_name(
+        self,
+        player: str,
+        *,
+        position: str | None = None,
+        team: str | None = None,
+    ) -> str | None:
+        return self._player_matcher.match(
+            player, position=position, team=team
+        ).canonical
 
     def add_pick(
         self,
@@ -674,7 +701,11 @@ class DraftSession:
                     ),
                     None,
                 )
-                canonical = self._canonical_name(remote.get("player", ""))
+                canonical = self._canonical_name(
+                    remote.get("player", ""),
+                    position=remote.get("position"),
+                    team=remote.get("player_team"),
+                )
                 if local:
                     if canonical:
                         same = normalize_player_name(
@@ -698,8 +729,7 @@ class DraftSession:
                         )
                     continue
                 if canonical is None:
-                    unknown = f"Unknown player {remote.get('external_id', '')}"
-                    label = remote.get("player") or unknown.strip()
+                    label = remote.get("player") or "Unknown player"
                     pick = {
                         "number": number,
                         "player": label,
@@ -877,7 +907,11 @@ class DraftSession:
             }
             public_picks = [
                 {
-                    **pick,
+                    **{
+                        key: value
+                        for key, value in pick.items()
+                        if key != "external_id"
+                    },
                     "adp": adp_lookup.get(
                         normalize_player_name(str(pick["player"]))
                     )
@@ -898,6 +932,7 @@ class DraftSession:
                 "draft_slot": self.draft_slot,
                 "teams": self.teams,
                 "rounds": self.rounds,
+                "flex_positions": list(self.flex_positions),
                 "metric": self.metric,
                 "metrics": list(METRICS),
                 "current_pick": current,
@@ -912,7 +947,18 @@ class DraftSession:
                 "drafted_path": str(self.paths.drafted),
                 "session_path": str(self.paths.session),
                 "simulate_api_down": self.simulate_api_down,
-                "adp_fallback_count": self.adp_fallback_count,
+                "adp_refresh_count": self.adp_refresh_count,
+                "adp_model": {
+                    **self.adp_model.public_info(
+                        matched_players=len(self._adp_distributions)
+                    ),
+                    "league_rounds": self.rounds,
+                    "rounds_match": self.adp_model.rounds
+                    in {
+                        None,
+                        self.rounds,
+                    },
+                },
                 "alias_count": self.alias_count,
                 "optimizer_profile": dict(
                     self.state.get("optimizer_profile")

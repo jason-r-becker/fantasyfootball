@@ -14,8 +14,8 @@ punctuation.
 
 ### `Missing draft rankings`
 
-The exact `data/YEAR/LEAGUE/clean.csv` path is missing. `raw.csv` and `adp.csv`
-do not replace it; ask the rankings preparer for the generated `clean.csv` or
+The exact `data/YEAR/LEAGUE/clean.csv` path is missing. `raw.csv` does not
+replace it; ask the rankings preparer for the generated `clean.csv` or
 follow [Data preparation](data-preparation.md).
 
 ### `Draft slot is missing` or `Draft slot must be between ...`
@@ -145,6 +145,45 @@ Each file replacement is atomic, but the session, working CSV, and pick log are
 three sequential writes. Restart the identical mode first; it reconstructs the
 CSV views from saved state and imports intentional spreadsheet changes. Compare
 the displayed log with the platform before making corrections.
+
+## ADP likelihood model
+
+### Startup says `adp_model is required`
+
+The config predates the FFC default. Verify the league's scoring rules and add
+an `adp_model` object with the matching format. Do not assume PPR from the
+platform name. To opt out deliberately, set its source to `disabled`. See the
+[configuration reference](configuration.md#ffc-adp-feed-and-availability-model).
+
+### The header says `FFC unavailable`
+
+The FFC request failed and no usable cache exists. The draft room remains
+operational using ADP already saved in `clean.csv` and labels missing
+distributions as fallback estimates. Check ordinary internet access and restart
+later; no Sleeper or ESPN login is involved.
+
+### Offline mode has no usable cache
+
+`adp_model.offline` prohibits network requests. Its cache must match the exact
+year, `teams`, and scoring `format`. Reconnect once with `offline` set to
+`false`, or transfer a matching private `.ffc_adp.json` cache. The cleaner stops
+without it; an already prepared draft room can still use `clean.csv`.
+
+### The header reports few matched players
+
+FFC may spell a player differently from `clean.csv`. Add only confirmed name
+equivalences to `data/YEAR/source_player_map.json` and restart. Late or
+rarely-drafted players may simply be absent from the source; their fallback is
+intentional.
+
+### The FFC badge warns about rounds
+
+FFC's source population and the league have different draft lengths. The
+league's `draft_rounds` still controls turns and plans. Early-round likelihoods
+remain usable, but deep-round tail estimates deserve caution.
+The same caution applies when the league and FFC population differ on kicker,
+defense, or bench slots; FFC does not expose enough information for an exact
+roster-rule correction.
 
 ## Installation and contributor checks
 

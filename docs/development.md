@@ -20,6 +20,9 @@ src/fantasyfootball/draft_app.py       CLI and local HTTP server
 src/fantasyfootball/draft_state.py     validation, state, CSV persistence
 src/fantasyfootball/draft_sources.py   read-only Sleeper/ESPN adapters
 src/fantasyfootball/draft_analysis.py  charts and draft optimization
+src/fantasyfootball/adp_model.py       FFC loading, cache, distributions
+src/fantasyfootball/player_matching.py shared safe player identity matching
+src/fantasyfootball/clean_data.py      projection/VOR and FFC preparation
 src/fantasyfootball/web/               packaged browser assets
 tests/                                 draft-room tests
 docs/                                  user and contributor documentation
@@ -36,21 +39,33 @@ Run these commands from the repository root after code or documentation work:
 
 ```bash
 uv run pytest
-uv run ruff check src/fantasyfootball/draft_app.py \
+uv run ruff check src/fantasyfootball/adp_model.py \
+  src/fantasyfootball/clean_data.py \
+  src/fantasyfootball/draft_app.py \
   src/fantasyfootball/draft_state.py \
   src/fantasyfootball/draft_sources.py \
   src/fantasyfootball/draft_analysis.py \
+  src/fantasyfootball/player_matching.py \
+  tests/test_adp_model.py \
+  tests/test_clean_data.py \
   tests/test_draft_app.py \
   tests/test_draft_sources.py \
   tests/test_draft_state.py \
+  tests/test_player_matching.py \
   tests/test_projection_script.py
-uv run ruff format --check src/fantasyfootball/draft_app.py \
+uv run ruff format --check src/fantasyfootball/adp_model.py \
+  src/fantasyfootball/clean_data.py \
+  src/fantasyfootball/draft_app.py \
   src/fantasyfootball/draft_state.py \
   src/fantasyfootball/draft_sources.py \
   src/fantasyfootball/draft_analysis.py \
+  src/fantasyfootball/player_matching.py \
+  tests/test_adp_model.py \
+  tests/test_clean_data.py \
   tests/test_draft_app.py \
   tests/test_draft_sources.py \
   tests/test_draft_state.py \
+  tests/test_player_matching.py \
   tests/test_projection_script.py
 node --check src/fantasyfootball/web/draft.js
 bash -n setup.sh
@@ -112,7 +127,7 @@ uv build
 ```
 
 Use synthetic fixture data for an automated launch test. A real private
-rehearsal should copy only `config.json`, `clean.csv`, optional `adp.csv`, and
-optional `source_player_map.json` into this temporary snapshot, run practice
+rehearsal should copy only `config.json`, `clean.csv`, and optional
+`source_player_map.json` into this temporary snapshot, run practice
 mode, and remove the entire temporary directory afterward. Never print or add
 those files to Git.

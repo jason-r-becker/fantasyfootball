@@ -10,9 +10,10 @@ from urllib.request import Request, urlopen
 
 from espn_api.football import League
 
-from fantasyfootball.draft_state import DraftError, normalize_position
+from fantasyfootball.draft_state import DraftError
+from fantasyfootball.player_matching import normalize_position
 
-_ESPN_PLAYER_MAPS: dict[int, dict[int, str]] = {}
+_ESPN_PLAYER_MAPS: dict[int, dict[int, dict[str, str]]] = {}
 _ESPN_PLAYER_MAPS_LOCK = Lock()
 
 
@@ -24,7 +25,10 @@ def _request_json(url: str, timeout: float = 8.0) -> Any:
         with urlopen(request, timeout=timeout) as response:
             return json.load(response)
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
-        raise DraftError(f"Draft API request failed: {error}") from error
+        # The failed request URL can contain a private draft identifier. Keep
+        # it in the exception chain for local debugging, but never place it in
+        # the user-facing error returned to the browser.
+        raise DraftError("Draft API request failed.") from error
 
 
 def parse_sleeper_picks(
@@ -39,19 +43,20 @@ def parse_sleeper_picks(
             + " "
             + metadata.get("last_name", "")
         )
-        picks.append(
-            {
-                "number": int(raw["pick_no"]),
-                "player": name.strip() or metadata.get("full_name", ""),
-                "position": normalize_position(
-                    metadata.get("position") or raw.get("position")
-                ),
-                "team": raw.get("draft_slot"),
-                "mine": bool(user_id and str(raw.get("picked_by")) == user_id),
-                "source": "Sleeper API",
-                "external_id": str(raw.get("player_id", "")),
-            }
-        )
+        pick = {
+            "number": int(raw["pick_no"]),
+            "player": name.strip() or metadata.get("full_name", ""),
+            "position": normalize_position(
+                metadata.get("position") or raw.get("position")
+            ),
+            "team": raw.get("draft_slot"),
+            "mine": bool(user_id and str(raw.get("picked_by")) == user_id),
+            "source": "Sleeper API",
+            "external_id": str(raw.get("player_id", "")),
+        }
+        if metadata.get("team"):
+            pick["player_team"] = metadata["team"]
+        picks.append(pick)
     return picks
 
 
@@ -102,7 +107,7 @@ def fetch_sleeper_team_names(config: dict[str, Any]) -> dict[int, str]:
 
 def parse_espn_picks(
     payload: dict[str, Any],
-    player_map: dict[int, str],
+    player_map: dict[int, str | dict[str, str]],
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
     raw_picks = (payload.get("draftDetail") or {}).get("picks") or []
@@ -125,10 +130,18 @@ def parse_espn_picks(
             or ((round_number - 1) * teams + round_pick)
         )
         team_id = int(raw.get("teamId", -1))
+        identity = player_map.get(player_id, "")
+        if isinstance(identity, dict):
+            player_name = identity.get("name", "")
+            position = identity.get("position", "")
+        else:
+            player_name = identity
+            position = ""
         picks.append(
             {
                 "number": number,
-                "player": player_map.get(player_id, ""),
+                "player": player_name,
+                "position": normalize_position(position),
                 "team": team_id,
                 "mine": team_id == my_team_id,
                 "source": "ESPN API",
@@ -138,7 +151,7 @@ def parse_espn_picks(
     return picks
 
 
-def _espn_player_map(league: League, year: int) -> dict[int, str]:
+def _espn_player_map(league: League, year: int) -> dict[int, dict[str, str]]:
     """Load ESPN's season player names once without caching credentials."""
     with _ESPN_PLAYER_MAPS_LOCK:
         cached = _ESPN_PLAYER_MAPS.get(year)
@@ -148,8 +161,14 @@ def _espn_player_map(league: League, year: int) -> dict[int, str]:
     players = league.espn_request.get_pro_players()
     if not isinstance(players, list):
         raise ValueError("ESPN returned an unexpected player response")
+    position_ids = {1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "DST"}
     player_map = {
-        int(player["id"]): str(player["fullName"])
+        int(player["id"]): {
+            "name": str(player["fullName"]),
+            "position": position_ids.get(
+                int(player.get("defaultPositionId") or 0), ""
+            ),
+        }
         for player in players
         if player.get("id") is not None and player.get("fullName")
     }

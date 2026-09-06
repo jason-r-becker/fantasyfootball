@@ -15,9 +15,11 @@ Copy the placeholder
 | --- | --- | --- | --- |
 | `teams` | integer | Always | Number of draft slots. It controls snake-pick ownership and the final pick number. |
 | `positions` | object | Full analysis | Starting counts for `QB`, `RB`, `WR`, `TE`, and `FLEX`. Use zero for an unused slot. Kicker and defense are intentionally not optimized. |
+| `flex_positions` | array | Recommended with FLEX | Positions eligible for `FLEX`; entries may be `QB`, `RB`, `WR`, or `TE`. The backward-compatible default is `RB` and `WR`, so declare the platform rule explicitly. |
 | `draft_rounds` | integer or `null` | Recommended | Total rounds. `--rounds` overrides it; if it is absent or `null`, the app uses 15. |
 | `draft_slot` | integer or `null` | Before operation | The user's 1-based draft-board column. `--pick` overrides it. Leave it `null` until the order is published. |
 | `site` | string | Platform sync | `Sleeper` or `ESPN`, case-insensitive. Missing or unsupported values leave the room in manual-only mode. |
+| `adp_model` | object | Always | Selects Fantasy Football Calculator ADP or explicitly disables it. For FFC, `source` is `ffc`, `format` is `standard`, `half-ppr`, `ppr`, or `2-qb`, and optional `offline` is a boolean. The top-level `teams` supplies league size. |
 | `draft_id` | string | Sleeper pick sync | Identifies the exact Sleeper draft whose picks will be read. |
 | `user_id` | string | Recommended for Sleeper | Lets API picks by this user populate **Your team**. It is not needed to download picks. |
 | `league_id` | string | ESPN pick sync; recommended for Sleeper | Identifies the ESPN league whose picks will be read. For Sleeper, it is used only to fetch owner display names. |
@@ -35,6 +37,89 @@ The draft room models a standard snake order. It does not currently model
 auction drafts, third-round reversal, traded-pick ownership, or arbitrary draft
 orders. Confirm the Sleeper draft's `type` is `snake` before relying on turn and
 roster projections.
+
+## FFC ADP feed and availability model
+
+FFC is the default and only automated ADP feed. Configure its scoring family
+explicitly for every league; it cannot be inferred reliably from `site`,
+`clean.csv`, or roster settings:
+
+```json
+"adp_model": {
+  "source": "ffc",
+  "format": "ppr",
+  "offline": false
+}
+```
+
+Use `ppr` for one point per reception, `half-ppr` for half a point, `standard`
+for no reception points, or `2-qb` for FFC's two-quarterback population. Verify
+this value against the platform's scoring rules. Those are the four FFC
+populations supported by this app; FFC's separate Dynasty and Rookie feeds are
+not accepted. `site` independently chooses Sleeper or ESPN pick synchronization;
+it never changes the ADP population. The FFC request uses only `format`,
+`teams`, and the launched year. It sends no league ID, draft ID, user ID, ESPN
+cookie, roster, or other private value.
+
+FFC does not accept the league's lineup, bench, FLEX, kicker, or defense rules,
+and its response metadata does not identify the source mock-draft roster
+template. The resulting population is league-specific only by year, team count,
+and scoring family. A `position` query can filter returned rows, but cannot
+rebuild the underlying drafts with or without kickers. This project excludes
+FFC K/DST rows from the offensive board; it does not apply an invented offset
+to player means or deviations. Treat late-round likelihoods as approximate
+when the league's special-team or bench rules differ from the FFC population.
+Set `draft_rounds` to the league's complete number of picks, including K/DST
+slots when present.
+
+FFC supplies mean ADP, standard deviation, observed earliest/latest picks, and
+the number of times each player was selected by a human. The app fits a
+lower-bounded normal distribution with a half-pick continuity correction and
+reports the probability that the player remains available at the target pick.
+Samples below 25 selections are linearly shrunk toward the fallback estimate;
+25 or more selections use the fitted model without legacy shrinkage. Missing
+players and distributions with a missing or nonpositive standard deviation use
+the fallback estimate entirely. That fallback applies the existing
+league-size/ADP heuristic, or 50% when no saved ADP exists. Observed
+earliest/latest picks are retained as source metadata but are not treated as
+hard bounds.
+
+When a player matches, FFC supplies the displayed ADP and bye week and the
+optimizer uses FFC mean ADP to order projected opponent selections. The cleaner
+stores ADP, standard deviation, sample count, earliest/latest observations, and
+source provenance in `clean.csv`. On launch, the room refreshes matched ADP and
+bye values in memory and in the mode's working CSV; immutable `clean.csv`
+changes only when the cleaner is run.
+
+The local source cache is reused for up to 12 hours and stored privately as
+`data/YEAR/LEAGUE/.ffc_adp.json`; FFC says its upstream ADP data updates once
+per day. A refresh writes atomically. If FFC is unavailable, the app uses a
+stale matching cache when one exists and otherwise keeps an existing prepared
+draft room operational with saved `clean.csv` ADP and fallback estimates. Set
+`"offline": true` to prohibit an FFC request and use only a matching cache.
+With no matching cache, the cleaner stops, while an existing draft room remains
+usable from `clean.csv`. The header badge identifies live, cached, stale,
+offline, unavailable, and disabled behavior. If FFC's reported round count
+differs from `draft_rounds`, the badge warns about the mismatch; the league's
+own round and lineup rules still control the optimizer.
+
+To deliberately run without FFC, use:
+
+```json
+"adp_model": {"source": "disabled"}
+```
+
+For an existing draft room, this escape hatch preserves ADP already stored in
+`clean.csv`. Running the cleaner while FFC is disabled regenerates `clean.csv`
+with blank ADP fields; it does not preserve an older file or restore the removed
+manual ADP-import workflow. Omitting `adp_model` is an error so an older config
+cannot silently assume the wrong scoring format.
+
+The feed is provided by the
+[Fantasy Football Calculator ADP REST API](https://help.fantasyfootballcalculator.com/article/42-adp-rest-api).
+FFC says its ADP is derived from human mock-draft selections after computer
+selections are removed. See its
+[ADP methodology](https://help.fantasyfootballcalculator.com/article/34-average-draft-position-adp-data).
 
 ## Find the Sleeper values
 
@@ -118,9 +203,15 @@ cookies unset. A private local config has this shape:
     "TE": 1,
     "FLEX": 1
   },
+  "flex_positions": ["RB", "WR", "TE"],
   "draft_rounds": null,
   "draft_slot": null,
   "site": "ESPN",
+  "adp_model": {
+    "source": "ffc",
+    "format": "ppr",
+    "offline": false
+  },
   "league_id": "REPLACE_WITH_ESPN_LEAGUE_ID",
   "team_id": null,
   "swid": "",
@@ -143,18 +234,24 @@ unknown:
     "TE": 1,
     "FLEX": 1
   },
+  "flex_positions": ["RB", "WR", "TE"],
   "draft_rounds": 15,
   "draft_slot": null,
   "site": "Sleeper",
+  "adp_model": {
+    "source": "ffc",
+    "format": "ppr",
+    "offline": false
+  },
   "user_id": "REPLACE_WITH_SLEEPER_USER_ID",
   "league_id": "REPLACE_WITH_SLEEPER_LEAGUE_ID",
   "draft_id": "REPLACE_WITH_SLEEPER_DRAFT_ID"
 }
 ```
 
-The lineup counts above illustrate the required shape; verify them against the
-league. A `null` slot is intentional. Set it to an integer after publication or
-pass `--pick NUMBER`.
+The lineup counts, FLEX eligibility, and `ppr` model above illustrate the
+required shape; verify all three against the league. A `null` slot is
+intentional. Set it to an integer after publication or pass `--pick NUMBER`.
 
 ## Login and `.env`
 

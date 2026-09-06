@@ -1,15 +1,20 @@
 import json
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pandas as pd
 import pytest
 
+from fantasyfootball import draft_sources
+from fantasyfootball.adp_model import ADPModel, PlayerDraftDistribution
 from fantasyfootball.draft_analysis import (
     build_dropoff_chart,
     build_league_tracker,
     optimize_draft,
 )
 from fantasyfootball.draft_sources import (
+    _ESPN_PLAYER_MAPS,
+    _espn_player_map,
     parse_espn_picks,
     parse_sleeper_picks,
     parse_sleeper_team_names,
@@ -49,6 +54,7 @@ def make_league(
         "teams": 4,
         "positions": {"QB": 1, "RB": 1, "WR": 1, "TE": 1, "FLEX": 1},
         "site": site,
+        "adp_model": {"source": "disabled"},
         "league_id": "league",
         "draft_id": "draft",
         "user_id": "me",
@@ -149,6 +155,39 @@ def test_config_rounds_and_manual_k_dst_fallback(tmp_path):
     assert [pick["position"] for pick in restored.picks] == ["K", "DST"]
 
 
+def test_configured_flex_eligibility_includes_tight_end(tmp_path):
+    league = make_league(tmp_path)
+    config_path = league / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["positions"] = {
+        "QB": 0,
+        "RB": 0,
+        "WR": 0,
+        "TE": 0,
+        "FLEX": 1,
+    }
+    config["flex_positions"] = ["TE"]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    session = DraftSession(tmp_path, 2026, "test", 1)
+    optimized = optimize_draft(session)
+
+    assert session.public_state()["flex_positions"] == ["TE"]
+    assert optimized["plans"][0]["selections"][0]["slot"] == "FLEX"
+    assert optimized["plans"][0]["selections"][0]["position"] == "TE"
+
+
+def test_invalid_flex_eligibility_is_rejected(tmp_path):
+    league = make_league(tmp_path)
+    config_path = league / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["flex_positions"] = ["RB", "K"]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(DraftError, match="flex_positions"):
+        DraftSession(tmp_path, 2026, "test", 1)
+
+
 def test_null_config_rounds_uses_default(tmp_path):
     league = make_league(tmp_path)
     config_path = league / "config.json"
@@ -188,13 +227,26 @@ def test_public_state_never_exposes_platform_ids_or_credentials(tmp_path):
     )
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    public = json.dumps(DraftSession(tmp_path, 2026, "test", 1).public_state())
+    session = DraftSession(tmp_path, 2026, "test", 1)
+    session.reconcile_platform_picks(
+        [
+            {
+                "number": 1,
+                "player": "Alpha Runner",
+                "source": "Sleeper API",
+                "external_id": "private-player-identifier",
+            }
+        ]
+    )
+    public = json.dumps(session.public_state())
 
     assert "private-swid" not in public
     assert "private-cookie" not in public
     assert config["draft_id"] not in public
     assert config["league_id"] not in public
     assert config["user_id"] not in public
+    assert "private-player-identifier" not in public
+    assert "external_id" not in public
 
 
 def test_optimizer_profile_latches_fast_every_pick_mode(tmp_path):
@@ -342,20 +394,41 @@ def test_draft_slot_can_come_from_league_config(tmp_path):
     assert session.is_my_pick(8)
 
 
-def test_missing_platform_adp_uses_consensus_fallback(tmp_path):
-    league = make_league(tmp_path)
-    clean = pd.read_csv(league / "clean.csv", index_col=0)
-    clean.loc[clean["Player"] == "Alpha Runner", "ADP"] = None
-    clean.to_csv(league / "clean.csv")
-    pd.DataFrame(
-        [{"Player": "Alpha Runner", "Sleeper": None, "AVG": 42.5}]
-    ).to_csv(league / "adp.csv", index=False)
+@pytest.mark.parametrize("site", ["Sleeper", "ESPN"])
+def test_ffc_refresh_is_platform_neutral(tmp_path, monkeypatch, site):
+    make_league(tmp_path, site=site)
+    model = ADPModel(
+        enabled=True,
+        available=True,
+        status="live",
+        scoring_format="ppr",
+        teams=4,
+        players=(
+            PlayerDraftDistribution(
+                name="Alpha Runner",
+                mean=42.5,
+                stdev=4.0,
+                samples=500,
+                team="AAA",
+                position="RB",
+                bye=12,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "fantasyfootball.draft_state.load_adp_model",
+        lambda config, year, path: model,
+    )
 
     session = DraftSession(tmp_path, 2026, "test", 1)
-
     alpha = session.full_df[session.full_df["Player"] == "Alpha Runner"]
+
     assert alpha.iloc[0]["ADP"] == 42.5
-    assert session.public_state()["adp_fallback_count"] == 1
+    assert alpha.iloc[0]["Bye"] == 12
+    assert alpha.iloc[0]["ADP Source"] == "FFC"
+    assert alpha.iloc[0]["ADP Std Dev"] == 4.0
+    assert alpha.iloc[0]["ADP Samples"] == 500
+    assert session.public_state()["adp_refresh_count"] == 1
 
 
 def test_confirmed_season_alias_maps_to_ranked_player(tmp_path):
@@ -372,6 +445,73 @@ def test_confirmed_season_alias_maps_to_ranked_player(tmp_path):
     assert pick["player"] == "Alpha Runner"
     assert session.public_state()["alias_count"] == 1
     assert session._canonical_name("AAA") is None
+
+
+@pytest.mark.parametrize("site", ["Sleeper", "ESPN"])
+def test_platform_reconciliation_uses_shared_safe_aliases(tmp_path, site):
+    make_league(tmp_path, site=site)
+    aliases = tmp_path / "data" / "2026" / "source_player_map.json"
+    aliases.write_text(
+        json.dumps({"B Receiver": "Bravo Receiver Jr."}),
+        encoding="utf-8",
+    )
+    session = DraftSession(tmp_path, 2026, "test", 1)
+
+    matched = session.reconcile_platform_picks(
+        [
+            {
+                "number": 1,
+                "player": "B Receiver",
+                "position": "WR",
+                "player_team": "BBB",
+                "source": f"{site} API",
+            }
+        ]
+    )
+
+    assert matched["added"][0]["player"] == "Bravo Receiver Jr."
+    assert matched["unmatched"] == []
+
+
+@pytest.mark.parametrize("site", ["Sleeper", "ESPN"])
+def test_platform_reconciliation_rejects_position_conflict(tmp_path, site):
+    make_league(tmp_path, site=site)
+    session = DraftSession(tmp_path, 2026, "test", 1)
+
+    result = session.reconcile_platform_picks(
+        [
+            {
+                "number": 1,
+                "player": "Bravo Receiver",
+                "position": "RB",
+                "source": f"{site} API",
+            }
+        ]
+    )
+
+    assert result["added"][0]["matched"] is False
+    assert result["unmatched"][0]["player"] == "Bravo Receiver"
+
+
+@pytest.mark.parametrize("site", ["Sleeper", "ESPN"])
+def test_platform_reconciliation_rejects_team_conflict(tmp_path, site):
+    make_league(tmp_path, site=site)
+    session = DraftSession(tmp_path, 2026, "test", 1)
+
+    result = session.reconcile_platform_picks(
+        [
+            {
+                "number": 1,
+                "player": "Bravo Receiver",
+                "position": "WR",
+                "player_team": "DIFFERENT",
+                "source": f"{site} API",
+            }
+        ]
+    )
+
+    assert result["added"][0]["matched"] is False
+    assert result["unmatched"][0]["player"] == "Bravo Receiver"
 
 
 def test_chart_and_optimizer_reproduce_terminal_draft_analysis(tmp_path):
@@ -429,6 +569,45 @@ def test_chart_and_optimizer_reproduce_terminal_draft_analysis(tmp_path):
     rerun = optimize_draft(session)
     assert rerun["plans"][0]["selections"][0]["pick"] == 8
     assert "RB" not in rerun["slots_remaining"]
+
+
+def test_optimizer_uses_matched_ffc_distribution(tmp_path, monkeypatch):
+    make_league(tmp_path)
+    model = ADPModel(
+        enabled=True,
+        available=True,
+        status="live",
+        scoring_format="ppr",
+        teams=4,
+        total_drafts=1000,
+        players=(
+            PlayerDraftDistribution(
+                name="Alpha Runner Jr.",
+                mean=3.0,
+                stdev=1.5,
+                samples=500,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "fantasyfootball.draft_state.load_adp_model",
+        lambda config, year, path: model,
+    )
+
+    session = DraftSession(tmp_path, 2026, "test", 1)
+    optimized = optimize_draft(session)
+    alpha = next(
+        pick
+        for plan in optimized["plans"]
+        for pick in plan["selections"]
+        if pick["player"] == "Alpha Runner"
+    )
+
+    assert alpha["probability_source"] == "ffc"
+    assert alpha["probability_mean"] == 3.0
+    assert alpha["probability_stdev"] == 1.5
+    assert alpha["probability_samples"] == 500
+    assert session.public_state()["adp_model"]["matched_players"] == 1
 
 
 def test_snake_slot_and_manual_undo(tmp_path):
@@ -544,6 +723,7 @@ def test_parse_sleeper_and_espn_payloads():
                     "first_name": "Alpha",
                     "last_name": "Runner",
                     "position": "RB",
+                    "team": "AAA",
                 },
             }
         ],
@@ -557,6 +737,7 @@ def test_parse_sleeper_and_espn_payloads():
         "mine": True,
         "source": "Sleeper API",
         "external_id": "p1",
+        "player_team": "AAA",
     }
 
     defense = parse_sleeper_picks(
@@ -604,3 +785,68 @@ def test_parse_sleeper_and_espn_payloads():
     assert len(espn) == 1
     assert espn[0]["mine"] is True
     assert espn[0]["player"] == "Charlie Passer"
+
+
+def test_espn_player_directory_maps_default_positions_and_defense():
+    class Requester:
+        @staticmethod
+        def get_pro_players():
+            return [
+                {
+                    "id": 10,
+                    "fullName": "Example Receiver",
+                    "defaultPositionId": 3,
+                },
+                {
+                    "id": -20,
+                    "fullName": "Example Defense",
+                    "defaultPositionId": 16,
+                },
+            ]
+
+    class League:
+        espn_request = Requester()
+
+    _ESPN_PLAYER_MAPS.pop(2037, None)
+    player_map = _espn_player_map(League(), 2037)
+
+    assert player_map == {
+        10: {"name": "Example Receiver", "position": "WR"},
+        -20: {"name": "Example Defense", "position": "DST"},
+    }
+
+
+def test_platform_request_error_does_not_echo_private_url(monkeypatch):
+    private_url = "https://example.invalid/draft/private-draft-identifier"
+
+    def fail_request(*args, **kwargs):
+        raise HTTPError(private_url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(draft_sources, "urlopen", fail_request)
+
+    with pytest.raises(DraftError) as captured:
+        draft_sources._request_json(private_url)
+
+    assert str(captured.value) == "Draft API request failed."
+    assert "private-draft-identifier" not in str(captured.value)
+
+
+def test_missing_platform_name_does_not_leak_external_id(tmp_path):
+    make_league(tmp_path)
+    session = DraftSession(tmp_path, 2026, "test", 1)
+
+    result = session.reconcile_platform_picks(
+        [
+            {
+                "number": 1,
+                "player": "",
+                "position": "K",
+                "source": "ESPN API",
+                "external_id": "private-player-identifier",
+            }
+        ]
+    )
+
+    assert result["unmatched"][0]["player"] == "Unknown player"
+    browser_json = json.dumps(session.public_state())
+    assert "private-player-identifier" not in browser_json

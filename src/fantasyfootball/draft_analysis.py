@@ -7,14 +7,17 @@ from typing import Any
 
 import pandas as pd
 
+from fantasyfootball.adp_model import legacy_probability
+from fantasyfootball.adp_model import (
+    probability_available as modeled_probability_available,
+)
 from fantasyfootball.draft_state import (
     DraftError,
     DraftSession,
-    normalize_player_name,
 )
+from fantasyfootball.player_matching import normalize_player_name
 
 POSITIONS = ("QB", "RB", "WR", "TE")
-FLEX_POSITIONS = {"RB", "WR"}
 CHART_METRICS = (
     "VOR_Floor",
     "VOR_Points",
@@ -58,8 +61,9 @@ def _own_picks(session: DraftSession) -> list[int]:
 def _projected_pool(
     records: list[dict[str, Any]],
     picks_before: int,
+    session: DraftSession,
 ) -> list[dict[str, Any]]:
-    by_adp = _sort_by_adp(records)
+    by_adp = _sort_by_adp(records, session)
     gone = {
         normalize_player_name(player["Player"])
         for player in by_adp[: max(0, picks_before)]
@@ -71,21 +75,32 @@ def _projected_pool(
     ]
 
 
-def _sort_by_adp(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _expected_adp(
+    player: dict[str, Any], session: DraftSession | None = None
+) -> float:
+    if session is not None:
+        distribution = session.adp_distribution(str(player["Player"]))
+        if distribution is not None:
+            return distribution.mean
+    return float("inf") if pd.isna(player.get("ADP")) else float(player["ADP"])
+
+
+def _sort_by_adp(
+    records: list[dict[str, Any]], session: DraftSession | None = None
+) -> list[dict[str, Any]]:
     return sorted(
         records,
-        key=lambda player: (
-            float("inf")
-            if pd.isna(player.get("ADP"))
-            else float(player["ADP"])
-        ),
+        key=lambda player: _expected_adp(player, session),
     )
 
 
 def _best_player(
-    records: list[dict[str, Any]], slot: str, metric: str
+    records: list[dict[str, Any]],
+    slot: str,
+    metric: str,
+    flex_positions: tuple[str, ...],
 ) -> dict[str, Any] | None:
-    eligible = FLEX_POSITIONS if slot == "FLEX" else {slot}
+    eligible = set(flex_positions) if slot == "FLEX" else {slot}
     candidates = [
         player
         for player in records
@@ -112,6 +127,7 @@ def _expected_lineup(
     roster: list[dict[str, Any]],
     requirements: dict[str, int],
     flex_required: int,
+    flex_positions: set[str],
 ) -> tuple[list[tuple[str, dict[str, Any]]], list[dict[str, Any]], list[str]]:
     """Select the highest projected scoring starters from a roster."""
     remaining = list(roster)
@@ -135,7 +151,7 @@ def _expected_lineup(
         (
             player
             for player in remaining
-            if player.get("Position") in FLEX_POSITIONS
+            if player.get("Position") in flex_positions
         ),
         key=lambda player: _numeric_value(player, "Points"),
         reverse=True,
@@ -218,7 +234,8 @@ def build_league_tracker(session: DraftSession) -> dict[str, Any]:
             {**row, "_projected": True}
             for row in session.full_df.to_dict("records")
             if normalize_player_name(str(row["Player"])) not in drafted
-        ]
+        ],
+        session,
     )
     excluded = {
         normalize_player_name(player) for player in session.excluded_players
@@ -234,13 +251,16 @@ def build_league_tracker(session: DraftSession) -> dict[str, Any]:
             break
         owner = _pick_owner_slot(number, session.teams)
         _, _, missing = _expected_lineup(
-            rosters[owner], requirements, flex_required
+            rosters[owner],
+            requirements,
+            flex_required,
+            set(session.flex_positions),
         )
         eligible_positions = {
             position for position in missing if position != "FLEX"
         }
         if "FLEX" in missing:
-            eligible_positions.update(FLEX_POSITIONS)
+            eligible_positions.update(session.flex_positions)
 
         candidate_index = None
         for index, player in enumerate(projected_pool):
@@ -266,7 +286,10 @@ def build_league_tracker(session: DraftSession) -> dict[str, Any]:
     teams = []
     for slot, roster in rosters.items():
         lineup, remaining, missing = _expected_lineup(
-            roster, requirements, flex_required
+            roster,
+            requirements,
+            flex_required,
+            set(session.flex_positions),
         )
         lineup_payload = []
         for lineup_slot, player in lineup:
@@ -398,9 +421,13 @@ def build_dropoff_chart(
         projected_players = []
         for label, pick_number in zip(marker_labels, own_picks, strict=False):
             pool = _projected_pool(
-                records, max(0, pick_number - session.current_pick)
+                records,
+                max(0, pick_number - session.current_pick),
+                session,
             )
-            player = _best_player(pool, position, metric)
+            player = _best_player(
+                pool, position, metric, session.flex_positions
+            )
             if player is None:
                 continue
             player_name = str(player["Player"])
@@ -485,17 +512,51 @@ def _starter_slots_remaining(session: DraftSession) -> list[str]:
         )
     flex_used = sum(
         max(0, counts[position] - requirements[position])
-        for position in FLEX_POSITIONS
+        for position in session.flex_positions
     )
     slots.extend(["FLEX"] * max(0, flex_required - flex_used))
     return slots
 
 
 def _probability_available(adp: Any, pick: int, teams: int) -> float:
-    if pd.isna(adp):
-        return 0.5
-    probability = 0.5 - 0.3 * ((pick - float(adp)) / teams)
-    return round(max(0.0, min(1.0, probability)), 2)
+    return round(legacy_probability(adp, pick, teams), 3)
+
+
+def _availability_estimate(
+    session: DraftSession, player: dict[str, Any], pick: int
+) -> dict[str, Any]:
+    distribution = session.adp_distribution(str(player["Player"]))
+    if (
+        distribution is None
+        or distribution.stdev is None
+        or distribution.stdev <= 0
+    ):
+        return {
+            "probability": _probability_available(
+                player.get("ADP"), pick, session.teams
+            ),
+            "probability_source": "saved-adp-fallback",
+            "probability_mean": None,
+            "probability_stdev": None,
+            "probability_samples": None,
+        }
+    probability = modeled_probability_available(
+        distribution,
+        pick,
+        fallback_adp=player.get("ADP"),
+        teams=session.teams,
+    )
+    return {
+        "probability": round(probability, 3),
+        "probability_source": "ffc",
+        "probability_mean": round(distribution.mean, 1),
+        "probability_stdev": (
+            None
+            if distribution.stdev is None
+            else round(distribution.stdev, 1)
+        ),
+        "probability_samples": distribution.samples,
+    }
 
 
 def _simulate_plan(
@@ -543,9 +604,8 @@ def _simulate_plan(
         )
         value = choice["_value"]
         backup_value = value if backup is None else backup["_value"]
-        probability = _probability_available(
-            choice.get("ADP"), target, session.teams
-        )
+        availability = _availability_estimate(session, choice, target)
+        probability = availability["probability"]
         risk_adjusted = probability * value + (1 - probability) * backup_value
         round_number, offset = divmod(target - 1, session.teams)
         selections.append(
@@ -562,7 +622,7 @@ def _simulate_plan(
                 if pd.isna(choice.get("ADP"))
                 else round(float(choice["ADP"]), 1),
                 "value": round(value, 2),
-                "probability": probability,
+                **availability,
                 "backup": None if backup is None else str(backup["Player"]),
             }
         )
@@ -579,7 +639,7 @@ def _simulate_plan(
 
 
 def _prepare_optimizer_pool(
-    available: pd.DataFrame, metric: str
+    available: pd.DataFrame, metric: str, session: DraftSession
 ) -> dict[str, Any]:
     records = []
     for raw in available.to_dict("records"):
@@ -587,16 +647,12 @@ def _prepare_optimizer_pool(
             continue
         player = dict(raw)
         player["_key"] = normalize_player_name(str(player["Player"]))
-        player["_adp"] = (
-            float("inf")
-            if pd.isna(player.get("ADP"))
-            else float(player["ADP"])
-        )
+        player["_adp"] = _expected_adp(player, session)
         player["_value"] = float(player[metric])
         records.append(player)
     by_slot = {}
     for slot in (*POSITIONS, "FLEX"):
-        eligible = FLEX_POSITIONS if slot == "FLEX" else {slot}
+        eligible = set(session.flex_positions) if slot == "FLEX" else {slot}
         by_slot[slot] = sorted(
             (
                 player
@@ -628,7 +684,7 @@ def optimize_draft(
     if len(targets) < len(slots):
         slots = slots[: len(targets)]
     available = _available_frame(session)
-    pool = _prepare_optimizer_pool(available, session.metric)
+    pool = _prepare_optimizer_pool(available, session.metric, session)
     unique_orders = sorted(set(itertools.permutations(slots)))
     plans = []
     seen_players = set()

@@ -7,9 +7,15 @@
     "TE": 1,
     "FLEX": 1
   },
+  "flex_positions": ["RB", "WR", "TE"],
   "draft_rounds": 15,
   "draft_slot": null,
   "site": "Sleeper",
+  "adp_model": {
+    "source": "ffc",
+    "format": "ppr",
+    "offline": false
+  },
   "user_id": "REPLACE_WITH_SLEEPER_USER_ID",
   "league_id": "REPLACE_WITH_SLEEPER_LEAGUE_ID",
   "draft_id": "REPLACE_WITH_SLEEPER_DRAFT_ID"

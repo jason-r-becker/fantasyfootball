@@ -1,223 +1,28 @@
-# %%
+"""Prepare league rankings from projections and FFC draft-position data."""
+
+from __future__ import annotations
+
 import json
 import os
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
-
-from collections import defaultdict
+from typing import Any
 
 import numpy as np
 import pandas as pd
-from fuzzywuzzy import fuzz
-from fuzzywuzzy import process
+from fuzzywuzzy import fuzz, process
 
+from fantasyfootball.adp_model import ADPModel, ADPModelError, load_adp_model
+from fantasyfootball.player_matching import (
+    PlayerMatcher,
+    PlayerMatchError,
+    load_player_aliases,
+)
 from fantasyfootball.utils import root
 
-# %%
-
-year = int(input("Input Year:  "))
-league = input("Input League Name:  ")
-path = root() / f"data/{year}/{league}"
-
-if not path.exists():
-    raise FileNotFoundError(
-        f"League: '{league}' does not exist, no path found for {path}"
-    )
-
-positions = ["QB", "RB", "WR", "TE", "FLEX"]
-
-try:
-    with open(path / "config.json", "r") as file:
-        config = json.load(file)
-except FileNotFoundError:
-    config = {}
-    config["teams"] = int(input("Input Number of Teams: "))
-    config["positions"] = {}
-    config["site"] = "Sleeper"
-    for pos in positions:
-        config["positions"][pos] = int(input(f"Input the Number of {pos}'s: "))
-
-    with open(path / "config.json", "w") as file:
-        json.dump(config, file)
-
-
-n_teams = config["teams"]
-n_pos = config["positions"]
-adp_source = config["site"].lower()
-
-# %%
-df = pd.read_csv(path / "raw.csv").reset_index()
-df.columns = [col.lower() for col in df.columns]
-
-keep_cols = [
-    "player",
-    "team",
-    "position",
-    "points",
-    "floor",
-    "ceiling",
-    "sd_pts",
-]
-
-
-col_map = {
-    "floor": "Floor",
-    "mean": "Points",
-    "ceiling": "Ceiling",
-    "sd_pts": "Std Dev",
-}
-
-
-df = df[keep_cols].reset_index(drop=True)
-df.columns = [col_map.get(c, c.title()) for c in df.columns]
-vor_cols = ["Points", "Floor", "Ceiling"]
-for col in vor_cols:
-    df[f"VOR_{col}"] = np.nan
-
-
-def get_draft_based_replacement_value(position, pos_df, n_pos):
-    if position == "FLEX":
-        n = n_pos["RB"] + n_pos["WR"] + n_pos["FLEX"] + 1
-    elif position == "TE":
-        n = n_pos["TE"]
-    elif position == "WR":
-        n = n_pos["WR"] + 1
-    elif position == "RB":
-        n = n_pos["RB"] + 1
-    elif position == "QB":
-        n = n_pos["QB"]
-    repl_val = np.mean(pos_df["Points"].iloc[n_teams * n : n_teams * (n + 1)])
-    return repl_val
-
-
-pos_df_list = []
-flex_df_list = []
-for pos, n in n_pos.items():
-    if pos == "FLEX":
-        pos_df = df[df["Position"].isin(["RB", "WR", "TE"])].sort_values(
-            "Points", ascending=False
-        )
-    else:
-        pos_df = df[df["Position"] == pos].sort_values(
-            "Points", ascending=False
-        )
-    try:
-        replacement_val = config["waiver_weekly_position_value"][pos] * 17
-        print(f"{pos} -- from Waivers: {replacement_val:.1f}")
-    except KeyError:
-        replacement_val = get_draft_based_replacement_value(pos, pos_df, n_pos)
-        print(f"{pos} -- from Draft: {replacement_val:.1f}")
-    for metric in vor_cols:
-        col = f"FLEX_VOR_{metric}" if pos == "FLEX" else f"VOR_{metric}"
-        pos_df[col] = pos_df[metric] - replacement_val
-
-    if pos == "FLEX":
-        flex_df_list.append(pos_df)
-    else:
-        pos_df_list.append(pos_df)
-
-
-df = pd.concat(pos_df_list).sort_values("VOR_Floor", ascending=False)
-flex_df = pd.concat(flex_df_list)
-for metric in vor_cols:
-    col = f"FLEX_VOR_{metric}"
-    df[col] = flex_df[col]
-
-df.index += 1
-df
-
-# %%
-# Add ADP and bye week.
-adp_df = pd.read_csv(
-    path / "adp.csv", engine="python", on_bad_lines="skip"
-).dropna(how="all")
-adp_df.columns = adp_df.columns.str.lower()
-adp_df = adp_df.rename(columns={"bye": "Bye", "player": "Player", "pos": "POS"})
-platform_adp = pd.to_numeric(adp_df[adp_source], errors="coerce")
-if "avg" in adp_df:
-    consensus_adp = pd.to_numeric(adp_df["avg"], errors="coerce")
-    adp_df["ADP"] = platform_adp.fillna(consensus_adp)
-else:
-    adp_df["ADP"] = platform_adp
-ignored_positions = ["K", "DST"]
-for pos in ignored_positions:
-    adp_df = adp_df[~adp_df["POS"].str.startswith(pos)].copy()
-
-clean_df = pd.merge(
-    df, adp_df[["Bye", "ADP", "Player"]], on="Player", how="left"
-)
-
-# When matching data there will be mismatches. Fix them by first finding
-# all player names in the clean data that don't have an exact match.
-missing_adp_picks = set(list(range(1, 200))) - set(clean_df["ADP"].values)
-missing_players = adp_df.loc[
-    adp_df["ADP"].isin(missing_adp_picks), "Player"
-].values
-
-season_player_map_path = path.parent / "source_player_map.json"
-try:
-    with open(season_player_map_path, "r") as file:
-        season_player_map = json.load(file)
-except FileNotFoundError:
-    season_player_map = {}
-
-# %%
-
-
-# Perform fuzzy logic matching on all the players without an exact match,
-# prompting the user to confirm/deny each fuzzy match.
-def find_best_match(name, choices):
-    return process.extractOne(name, choices, scorer=fuzz.partial_ratio)
-
-
-projection_players = set(clean_df["Player"])
-confirmed_player_map = {
-    player: season_player_map[player]
-    for player in missing_players
-    if player in season_player_map
-    and season_player_map[player] in projection_players
-}
-unresolved_players = [
-    player for player in missing_players if player not in confirmed_player_map
-]
-raw_missing_player_map = {
-    player: find_best_match(player, clean_df["Player"])[0]
-    for player in unresolved_players
-}
-missing_player_map = confirmed_player_map.copy()
-if confirmed_player_map:
-    print("\nUsing confirmed mappings from source_player_map.json:")
-    print(pd.Series(confirmed_player_map))
-print("\nVerify that the player mapping is correct.")
-print('Press [Enter] if the player is correct, input "N" for incorrect\n')
-for adp_player, clean_player in raw_missing_player_map.items():
-    adp = adp_df.loc[adp_df["Player"] == adp_player, "ADP"].squeeze()
-    while True:
-        user_input = input(f"  {adp:.0f}) {adp_player} --> {clean_player}:  ")
-        if user_input == "":
-            missing_player_map[adp_player] = clean_player
-            break
-        elif user_input.upper() == "N":
-            break
-        elif user_input.upper() in {"Q", "E"}:
-            print("\nExiting")
-            quit()
-        else:
-            print('\nPlease only input [Enter] or "N"')
-
-print("\nThe mapped players are listed below")
-print(pd.Series(missing_player_map))
-
-# %%
-# Update the ADP and Bye week for the confirmed fuzzy matched players.
-for adp_player, clean_player in missing_player_map.items():
-    adp = adp_df.loc[adp_df["Player"] == adp_player, "ADP"].squeeze()
-    bye = adp_df.loc[adp_df["Player"] == adp_player, "Bye"].squeeze()
-    clean_df.loc[clean_df["Player"] == clean_player, "ADP"] = adp
-    clean_df.loc[clean_df["Player"] == clean_player, "Bye"] = bye
-
-
-# Save to both 'clean' and 'live' .csv files, to be used by live_draft.py
-cols = [
+POSITIONS = ("QB", "RB", "WR", "TE", "FLEX")
+OUTPUT_COLUMNS = (
     "Player",
     "Team",
     "Position",
@@ -233,10 +38,315 @@ cols = [
     "FLEX_VOR_Ceiling",
     "Std Dev",
     "ADP",
-]
-clean_df = clean_df[cols].round(2)
+    "ADP Source",
+    "ADP Std Dev",
+    "ADP Samples",
+    "ADP Earliest",
+    "ADP Latest",
+)
 
-for fid in ["clean", "live_draft"]:
-    clean_df.to_csv(path / f"{fid}.csv")
 
-# %%
+def _read_config(path: Path) -> dict[str, Any]:
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            f"Missing league configuration: {path}"
+        ) from error
+    if not isinstance(config, dict):
+        raise ValueError("config.json must contain a JSON object.")
+    return config
+
+
+def _replacement_value(
+    position: str,
+    position_frame: pd.DataFrame,
+    position_counts: dict[str, int],
+    teams: int,
+    flex_positions: tuple[str, ...] = (),
+) -> float:
+    if position == "FLEX":
+        count = sum(position_counts.get(pos, 0) for pos in flex_positions)
+        count += position_counts.get("FLEX", 0) + 1
+    elif position in {"WR", "RB"}:
+        count = position_counts[position] + 1
+    else:
+        count = position_counts[position]
+    values = position_frame["Points"].iloc[teams * count : teams * (count + 1)]
+    if values.empty:
+        values = position_frame["Points"].tail(max(1, teams))
+    return float(values.mean())
+
+
+def prepare_projection_rankings(
+    raw: pd.DataFrame, config: dict[str, Any]
+) -> pd.DataFrame:
+    """Calculate value-over-replacement fields from projection input."""
+    frame = raw.copy().reset_index(drop=True)
+    frame.columns = [str(column).lower() for column in frame.columns]
+    required = (
+        "player",
+        "team",
+        "position",
+        "points",
+        "floor",
+        "ceiling",
+        "sd_pts",
+    )
+    missing = sorted(set(required) - set(frame.columns))
+    if missing:
+        raise ValueError(f"raw.csv is missing columns: {', '.join(missing)}")
+    frame = frame[list(required)].rename(
+        columns={
+            "player": "Player",
+            "team": "Team",
+            "position": "Position",
+            "points": "Points",
+            "floor": "Floor",
+            "ceiling": "Ceiling",
+            "sd_pts": "Std Dev",
+        }
+    )
+    frame["Player"] = frame["Player"].fillna("").astype(str).str.strip()
+    frame["Position"] = frame["Position"].astype(str).str.upper()
+    frame = frame[frame["Position"].isin(("QB", "RB", "WR", "TE"))].copy()
+    if (frame["Player"] == "").any() or frame["Player"].duplicated().any():
+        raise ValueError("raw.csv player names must be nonblank and unique.")
+
+    teams = int(config["teams"])
+    position_counts = config["positions"]
+    if not isinstance(position_counts, dict):
+        raise ValueError("config positions must be a JSON object.")
+    for metric in ("Points", "Floor", "Ceiling"):
+        frame[f"VOR_{metric}"] = np.nan
+        frame[f"FLEX_VOR_{metric}"] = np.nan
+
+    for position in ("QB", "RB", "WR", "TE"):
+        position_frame = frame[frame["Position"] == position].sort_values(
+            "Points", ascending=False
+        )
+        if position_frame.empty:
+            continue
+        weekly = config.get("waiver_weekly_position_value", {}).get(position)
+        replacement = (
+            float(weekly) * 17
+            if weekly is not None
+            else _replacement_value(
+                position, position_frame, position_counts, teams
+            )
+        )
+        for metric in ("Points", "Floor", "Ceiling"):
+            frame.loc[position_frame.index, f"VOR_{metric}"] = (
+                position_frame[metric] - replacement
+            )
+
+    configured_flex = config.get("flex_positions", ["RB", "WR"])
+    if not isinstance(configured_flex, list) or not configured_flex:
+        raise ValueError("flex_positions must be a non-empty JSON array.")
+    flex_positions = tuple(
+        dict.fromkeys(str(position).upper() for position in configured_flex)
+    )
+    invalid_flex = set(flex_positions) - {"QB", "RB", "WR", "TE"}
+    if invalid_flex:
+        raise ValueError("flex_positions may contain only QB, RB, WR, and TE.")
+    flex_frame = frame[frame["Position"].isin(flex_positions)].sort_values(
+        "Points", ascending=False
+    )
+    if not flex_frame.empty:
+        weekly = config.get("waiver_weekly_position_value", {}).get("FLEX")
+        replacement = (
+            float(weekly) * 17
+            if weekly is not None
+            else _replacement_value(
+                "FLEX",
+                flex_frame,
+                position_counts,
+                teams,
+                flex_positions,
+            )
+        )
+        for metric in ("Points", "Floor", "Ceiling"):
+            frame.loc[flex_frame.index, f"FLEX_VOR_{metric}"] = (
+                flex_frame[metric] - replacement
+            )
+    return frame.sort_values("VOR_Floor", ascending=False).reset_index(
+        drop=True
+    )
+
+
+def _confirm_fuzzy_match(source: str, suggestion: str, adp: float) -> bool:
+    print(
+        "\nVerify this FFC player mapping; it is never accepted automatically."
+    )
+    answer = input(f"  ADP {adp:.1f}) {source} --> {suggestion} [y/N]: ")
+    return answer.strip().lower() in {"y", "yes"}
+
+
+def merge_ffc_adp(
+    rankings: pd.DataFrame,
+    model: ADPModel,
+    aliases: dict[str, str] | None = None,
+    *,
+    confirmer: Callable[[str, str, float], bool] | None = None,
+    relevant_pick: int | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any], dict[str, str]]:
+    """Join FFC ADP by safe identity matching and report every miss."""
+    frame = rankings.copy()
+    for column in ("Bye", *OUTPUT_COLUMNS[14:]):
+        if column not in frame:
+            frame[column] = pd.NA
+
+    matcher = PlayerMatcher(frame.to_dict("records"), aliases)
+    matched: dict[str, Any] = {}
+    conflicts: list[dict[str, str]] = []
+    unresolved = []
+    for distribution in model.players:
+        result = matcher.match(
+            distribution.name,
+            position=distribution.position,
+            team=distribution.team,
+        )
+        if result.canonical is None:
+            unresolved.append(distribution)
+            if result.reason != "unmatched name":
+                conflicts.append(
+                    {
+                        "source": distribution.name,
+                        "reason": result.reason or "conflict",
+                    }
+                )
+            continue
+        if result.canonical in matched:
+            conflicts.append(
+                {
+                    "source": distribution.name,
+                    "reason": f"duplicate match for {result.canonical}",
+                }
+            )
+            continue
+        matched[result.canonical] = distribution
+
+    confirmed: dict[str, str] = {}
+    if confirmer is not None:
+        for distribution in sorted(unresolved, key=lambda player: player.mean):
+            if relevant_pick is not None and distribution.mean > relevant_pick:
+                continue
+            choices = matcher.compatible_names(
+                position=distribution.position, team=distribution.team
+            )
+            available = [name for name in choices if name not in matched]
+            suggestion = process.extractOne(
+                distribution.name, available, scorer=fuzz.ratio
+            )
+            if suggestion is None or suggestion[1] < 70:
+                continue
+            candidate = suggestion[0]
+            if confirmer(distribution.name, candidate, distribution.mean):
+                matched[candidate] = distribution
+                confirmed[distribution.name] = candidate
+
+    for canonical, distribution in matched.items():
+        selected = frame["Player"] == canonical
+        frame.loc[selected, "ADP"] = distribution.mean
+        frame.loc[selected, "Bye"] = distribution.bye
+        frame.loc[selected, "ADP Source"] = "FFC"
+        frame.loc[selected, "ADP Std Dev"] = distribution.stdev
+        frame.loc[selected, "ADP Samples"] = distribution.samples
+        frame.loc[selected, "ADP Earliest"] = distribution.earliest
+        frame.loc[selected, "ADP Latest"] = distribution.latest
+
+    unmatched = [
+        distribution.name
+        for distribution in unresolved
+        if distribution.name not in confirmed
+    ]
+    report = {
+        "source_players": len(model.players),
+        "matched_players": len(matched),
+        "alias_count": matcher.alias_count,
+        "conflicts": conflicts,
+        "unmatched": unmatched,
+    }
+    return frame, report, confirmed
+
+
+def _write_aliases(path: Path, aliases: dict[str, str]) -> None:
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(aliases, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def clean_league(year: int, league: str) -> dict[str, Any]:
+    """Generate clean and initial live rankings for one private league."""
+    league_path = root() / "data" / str(year) / league
+    if not league_path.exists():
+        raise FileNotFoundError(
+            f"League {league!r} does not exist: {league_path}"
+        )
+    config = _read_config(league_path / "config.json")
+    raw = pd.read_csv(league_path / "raw.csv")
+    rankings = prepare_projection_rankings(raw, config)
+    try:
+        model = load_adp_model(config, year, league_path)
+    except ADPModelError as error:
+        raise ValueError(str(error)) from error
+    if model.enabled and not model.available:
+        raise RuntimeError(
+            f"Could not prepare rankings: {model.message} "
+            "Reconnect or provide a matching FFC cache."
+        )
+    alias_path = league_path.parent / "source_player_map.json"
+    aliases = load_player_aliases(alias_path)
+    relevant_pick = int(config.get("draft_rounds") or 15) * int(
+        config["teams"]
+    )
+    rankings, report, confirmed = merge_ffc_adp(
+        rankings,
+        model,
+        aliases,
+        confirmer=_confirm_fuzzy_match if model.enabled else None,
+        relevant_pick=relevant_pick,
+    )
+    if confirmed:
+        _write_aliases(alias_path, {**aliases, **confirmed})
+    rankings = rankings[list(OUTPUT_COLUMNS)].round(2)
+    for name in ("clean.csv", "live_draft.csv"):
+        rankings.to_csv(league_path / name)
+    return report
+
+
+def main() -> None:
+    year = int(input("Input Year:  "))
+    league = input("Input League Name:  ").strip()
+    try:
+        report = clean_league(year, league)
+    except (
+        FileNotFoundError,
+        ValueError,
+        RuntimeError,
+        PlayerMatchError,
+    ) as error:
+        raise SystemExit(str(error)) from error
+    print(
+        f"Matched {report['matched_players']} of "
+        f"{report['source_players']} FFC players."
+    )
+    if report["conflicts"]:
+        print(
+            f"Rejected {len(report['conflicts'])} unsafe identity conflicts."
+        )
+    if report["unmatched"]:
+        print(f"Left {len(report['unmatched'])} FFC players unmatched.")
+
+
+if __name__ == "__main__":
+    main()

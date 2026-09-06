@@ -7,9 +7,15 @@
     "TE": 1,
     "FLEX": 1
   },
+  "flex_positions": ["RB", "WR", "TE"],
   "draft_rounds": null,
   "draft_slot": null,
   "site": "ESPN",
+  "adp_model": {
+    "source": "ffc",
+    "format": "ppr",
+    "offline": false
+  },
   "league_id": "REPLACE_WITH_ESPN_LEAGUE_ID",
   "team_id": null,
   "swid": "",

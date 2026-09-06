@@ -72,9 +72,34 @@ function renderSyncStatus(error = false) {
   }
 }
 
+function renderAdpStatus() {
+  const badge = $("#adp-badge");
+  const model = state.adp_model || {};
+  if (!model.enabled) {
+    badge.className = "status-dot";
+    badge.textContent = "FFC disabled · saved ADP fallback";
+    badge.title = "FFC is explicitly disabled in config.json.";
+  } else if (!model.available) {
+    badge.className = "status-dot error";
+    badge.textContent = "FFC unavailable · saved ADP fallback";
+    badge.title = model.message || "No FFC model or cache is available.";
+  } else {
+    const stale = model.status === "stale-cache";
+    const offline = model.status === "offline-cache";
+    const roundMismatch = !model.rounds_match;
+    badge.className = `status-dot ${stale || roundMismatch ? "" : "ready"}`.trim();
+    badge.textContent = `FFC ${model.teams}-team ${String(model.format).toUpperCase()} · ${model.matched_players} matched${offline ? " · offline" : ""}`;
+    const dates = model.start_date && model.end_date
+      ? `${model.start_date} through ${model.end_date}`
+      : "current source window";
+    badge.title = `${model.total_drafts ?? "Unknown number of"} matched drafts · ${dates}${stale ? " · stale cache" : ""}${offline ? " · offline cache" : ""}${roundMismatch ? ` · source uses ${model.rounds} rounds; league uses ${model.league_rounds}` : ""} · FFC does not encode custom K/DST or bench rules`;
+  }
+}
+
 function renderHeader() {
   $("#league-title").textContent = `${state.league} · ${state.year}`;
   $("#mode-badge").textContent = `${state.mode} mode`;
+  renderAdpStatus();
   renderSyncStatus();
   $("#sync-button").disabled = !state.sync_available;
   $("#pick-number").textContent = `#${state.current_pick}`;
@@ -114,14 +139,11 @@ function renderPlayers() {
   const players = state.players.filter((player) => {
     const positionMatch = activePosition === "ALL"
       || player.Position === activePosition
-      || (activePosition === "FLEX" && ["RB", "WR"].includes(player.Position));
+      || (activePosition === "FLEX" && state.flex_positions.includes(player.Position));
     const queryMatch = !query || `${player.Player} ${player.Team}`.toLowerCase().includes(query);
     return positionMatch && queryMatch;
   });
-  const fallbackSummary = state.adp_fallback_count
-    ? ` · ${state.adp_fallback_count} consensus ADP fallback${state.adp_fallback_count === 1 ? "" : "s"}`
-    : "";
-  $("#board-summary").textContent = `${players.length} shown · ${state.players.length} available${fallbackSummary}`;
+  $("#board-summary").textContent = `${players.length} shown · ${state.players.length} available`;
   $("#board-count").textContent = state.players.length;
   $("#metric-heading").textContent = state.metric.replaceAll("_", " ");
   $("#players").innerHTML = players.slice(0, 250).map((player) => `
@@ -320,7 +342,7 @@ function renderOptimization() {
       <div class="plan-pick">
         <span class="pick-label">${pick.pick_label}</span>
         <span class="pos-pill pos-${escapeHtml(pick.position)}">${escapeHtml(pick.slot)}</span>
-        <span><strong>${escapeHtml(pick.player)}</strong><span class="log-meta"> ADP ${pick.adp ?? "—"}${pick.backup ? ` · fallback ${escapeHtml(pick.backup)}` : ""}</span></span>
+        <span><strong>${escapeHtml(pick.player)}</strong><span class="log-meta"> ADP ${pick.adp ?? "—"}${pick.probability_source === "ffc" ? ` · FFC μ ${pick.probability_mean}, σ ${pick.probability_stdev}, n ${pick.probability_samples}` : " · saved ADP fallback"}${pick.backup ? ` · backup ${escapeHtml(pick.backup)}` : ""}</span></span>
         <span class="probability">${Math.round(pick.probability * 100)}% avail.</span>
         <button class="icon-button avoid-button" data-exclusion-player="${escapeHtml(pick.player)}" data-exclusion-state="true">Avoid</button>
       </div>`).join("")}</div>`;

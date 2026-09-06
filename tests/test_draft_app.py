@@ -18,6 +18,7 @@ def make_session(tmp_path, *, simulate_api_down=False):
         "teams": 2,
         "positions": {"QB": 1, "RB": 1, "WR": 1, "TE": 1, "FLEX": 1},
         "site": "Sleeper",
+        "adp_model": {"source": "disabled"},
         "draft_id": "draft",
     }
     (league / "config.json").write_text(json.dumps(config), encoding="utf-8")

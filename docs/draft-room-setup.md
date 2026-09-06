@@ -33,8 +33,7 @@ data/
     ├── source_player_map.json       # optional, recommended
     └── LEAGUE/
         ├── config.json              # required
-        ├── clean.csv                # required
-        └── adp.csv                  # optional, recommended
+        └── clean.csv                # required
 ```
 
 These files may be supplied by a rankings preparer, or most can be built using
@@ -43,13 +42,13 @@ the repository:
 - Copy and complete the
   [Sleeper example](../examples/sleeper-config.example.json) or
   [ESPN example](../examples/espn-config.example.json) for `config.json`. The
-  interactive cleaner can create a smaller config, but it does not ask for
-  platform IDs, draft rounds, or draft slot.
+  cleaner requires this file and does not create it interactively.
 - Generate `raw.csv` with the R projection script when a season
   `scoring_profiles.json` is available.
-- Obtain `adp.csv` separately.
-- Run `uv run python -m fantasyfootball.clean_data` to generate `clean.csv`
-  and the initial `live_draft.csv`.
+- Verify the league's `adp_model.format`; FFC scoring cannot be inferred from
+  the platform name.
+- Run `uv run python -m fantasyfootball.clean_data` to fetch/cache FFC ADP and
+  generate `clean.csv` plus the initial `live_draft.csv`.
 
 See [Data preparation](data-preparation.md) for exact prerequisites and outputs.
 
@@ -57,12 +56,14 @@ See [Data preparation](data-preparation.md) for exact prerequisites and outputs.
 
 Before launching:
 
-1. Match `teams`, `draft_rounds`, and the `positions` counts to the platform.
+1. Match `teams`, `draft_rounds`, `positions`, and `flex_positions` to the
+   platform.
 2. Confirm the draft is a standard snake draft.
 3. Set `site` to `Sleeper` or `ESPN`.
-4. Add the platform identifiers described in
+4. Verify `adp_model.format` as `standard`, `half-ppr`, `ppr`, or `2-qb`.
+5. Add the platform identifiers described in
    [Configuration reference](configuration.md).
-5. Once the order is available, set the user's 1-based `draft_slot` or pass it
+6. Once the order is available, set the user's 1-based `draft_slot` or pass it
    with `--pick`.
 
 The app can run in manual-only mode without platform IDs. A draft slot is still
@@ -87,7 +88,7 @@ The terminal prints the exact URL and files in use. Work through this checklist:
 3. Mark one ranked player taken, mark one pick as **Mine**, then undo and edit a
    pick.
 4. Record one **+ K** and one **+ D/ST** selection.
-5. Confirm **FLEX** shows eligible running backs and wide receivers.
+5. Confirm **FLEX** shows exactly the positions listed in `flex_positions`.
 6. Stop with `Ctrl+C`, restart with the same command, and confirm the practice
    picks resume.
 7. Click **Reset practice draft** and confirm the practice board returns to its

@@ -21,12 +21,15 @@ terminal command records your intent.
 
 The app reads `config.json` and immutable rankings from `clean.csv`. It then:
 
-1. fills missing platform ADP values from matching `Player`/`AVG` rows in
-   `adp.csv`, when available;
-2. loads season aliases from `data/YEAR/source_player_map.json`, when available;
-3. creates or resumes the selected mode's hidden session JSON;
-4. imports deletions or restorations already present in that mode's working CSV;
-5. rewrites the working CSV and chronological pick log from current state.
+1. loads season aliases from `data/YEAR/source_player_map.json`, when available;
+2. loads or refreshes the required-by-default FFC feed using only the configured
+   year, team count, and scoring format;
+3. matches FFC players through normalized exact names or confirmed aliases,
+   with position and NFL-team safeguards, then refreshes matched ADP and bye
+   values;
+4. creates or resumes the selected mode's hidden session JSON;
+5. imports deletions or restorations already present in that mode's working CSV;
+6. rewrites the working CSV and chronological pick log from current state.
 
 On the first ESPN synchronization that contains picks, the app downloads the
 season player-name map once. Later synchronization requests in the same process
@@ -69,8 +72,9 @@ platform.
 The board ranks the available pool by the selected metric. The default is
 `VOR_Points`; changing the board metric also changes the optimizer metric.
 
-The **FLEX** board and optimizer treat only RB and WR as FLEX-eligible. TE is
-not included, even if a platform league permits it. K and DST are not optimized.
+The **FLEX** board and optimizer use the config's `flex_positions`; older
+configs without that field retain the RB/WR-only behavior. K and DST are not
+optimized.
 
 The projected-team optimizer runs automatically on your turns. After any run
 completes in under 500 ms, it switches to automatic calculation after every
@@ -82,6 +86,18 @@ The drop-off chart has browser-local controls for metric, Y-axis bounds, and
 position-rank count. These chart settings do not change the optimizer. Resetting
 them restores `VOR_Points`, automatic bounds, and 18 ranks.
 
+When FFC is enabled, each projected pick shows the FFC mean (`μ`),
+standard deviation (`σ`), human-selection sample count (`n`), and fitted chance
+of availability. The top badge shows the selected scoring/team population,
+source date range, total drafts, match count, and any stale-cache or round-count
+warning. Players not present in the source remain usable and are labeled `ADP
+fallback`. Matched players use FFC mean ADP both on the board and in projected
+opponent ordering. Sleeper and ESPN use this identical ADP path; `site` changes
+only which read-only pick adapter runs. FFC does not encode the league's K/DST
+or bench composition, so late-round estimates are approximate when those rules
+differ from its source population; the app does not fabricate a correction
+from summary statistics.
+
 ## Files and persistence
 
 All generated files live beside the league config and rankings:
@@ -92,8 +108,13 @@ All generated files live beside the league config and rankings:
 | `practice_live_draft.csv` | Remaining ranked players in practice. |
 | `practice_drafted_players.csv` | Chronological practice pick log. |
 | `.draft_app.live.json` | Resumable live state. |
+| `.ffc_adp.json` | Shared private FFC response cache; refreshed at most every 12 hours. |
 | `live_draft.csv` | Remaining ranked players in live mode and legacy spreadsheet fallback. |
 | `drafted_players.csv` | Chronological live pick log, including source, match, lock, team, and timestamp metadata. |
+
+Platform external player IDs remain in the private session and pick-log files
+for local reconciliation, but the app removes them from the browser state.
+User-facing request errors also omit private draft URLs and identifiers.
 
 Pick changes, exclusions, metric changes, spreadsheet imports, and practice
 resets immediately rewrite the session, available-player CSV, and pick-log CSV.
