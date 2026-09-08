@@ -143,6 +143,19 @@ run either draft-room adapter.
 
 ## Weekly projection files
 
+Scrape weekly projections for every saved scoring profile with:
+
+```bash
+Rscript scripts/generate_ffanalytics_projections.R --year=2026 --week=1 --refresh
+```
+
+Replace the year and week as needed. Weekly mode supports weeks 1–18 and
+includes QB, RB, WR, TE, K, and DST. It scores the downloaded statistics using
+each league's saved rules and writes the weekday-stamped files below. Its
+`data/YEAR/ffanalytics_scrape_wkWEEK.rds` cache is separate from the season
+cache; it does not overwrite `raw.csv` or draft rankings. Omit `--refresh` to
+reuse the matching weekly cache. Omitting `--week` retains season mode.
+
 In-season lineup analysis uses this current destination pattern:
 
 ```text

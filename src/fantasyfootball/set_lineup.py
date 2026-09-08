@@ -83,14 +83,20 @@ class LineupOptimizer:
 
     def _read_projections_fid(self, fid):
         df = pd.read_csv(fid)
-        df["team"].fillna("FA", inplace=True)
+        df["team"] = df["team"].fillna("FA")
         df["projection"] = df[["floor", "points", "ceiling"]].mean(axis=1)
         df = df[df["player"].notna()]
         # Sometimes players are duplicated. Keep the row
         # with most data or highest projection.
         return (
-            df.groupby("player", group_keys=False)
-            .apply(drop_duplicates)
+            df.assign(_missing_fields=df.isna().sum(axis=1))
+            .sort_values(
+                ["player", "_missing_fields", "points"],
+                ascending=[True, True, False],
+                kind="stable",
+            )
+            .drop_duplicates("player")
+            .drop(columns="_missing_fields")
             .reset_index(drop=True)
         )
 

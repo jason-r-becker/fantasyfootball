@@ -11,6 +11,7 @@ usage <- paste(
   "",
   "Options:",
   "  --year=YEAR        Season year (defaults to the current year)",
+  "  --week=WEEK        Week 1-18, or 0 for season projections (default)",
   "  --sources=A,B,...  Projection sources (defaults to CBS, ESPN,",
   "                     FantasyPros, and FFToday)",
   "  --refresh          Discard the matching package cache and scrape again",
@@ -25,6 +26,7 @@ if (any(args %in% c("-h", "--help"))) {
 
 known_args <- args %in% "--refresh" |
   grepl("^--year=", args) |
+  grepl("^--week=", args) |
   grepl("^--sources=", args)
 if (any(!known_args)) {
   stop(
@@ -53,6 +55,13 @@ arg_value <- function(prefix, default = NULL) {
 }
 
 year <- as.integer(arg_value("--year", format(Sys.Date(), "%Y")))
+week_arg <- arg_value("--week", "0")
+if (!grepl("^[0-9]+$", week_arg) ||
+    is.na(suppressWarnings(as.integer(week_arg))) ||
+    as.integer(week_arg) > 18L) {
+  stop("--week must be an integer from 0 through 18", call. = FALSE)
+}
+week <- as.integer(week_arg)
 refresh <- "--refresh" %in% args
 sources <- strsplit(
   arg_value("--sources", "CBS,ESPN,FantasyPros,FFToday"),
@@ -60,6 +69,9 @@ sources <- strsplit(
   fixed = TRUE
 )[[1]]
 positions <- c("QB", "RB", "WR", "TE")
+if (week > 0L) {
+  positions <- c(positions, "K", "DST")
+}
 
 if (!requireNamespace("ffanalytics", quietly = TRUE)) {
   stop(
@@ -73,7 +85,9 @@ if (!requireNamespace("jsonlite", quietly = TRUE)) {
 
 year_dir <- file.path(repo_root, "data", year)
 profile_path <- file.path(year_dir, "scoring_profiles.json")
-cache_path <- file.path(year_dir, "ffanalytics_scrape.rds")
+cache_name <- if (week == 0L) "ffanalytics_scrape.rds" else
+  sprintf("ffanalytics_scrape_wk%d.rds", week)
+cache_path <- file.path(year_dir, cache_name)
 
 if (!file.exists(profile_path)) {
   stop("Missing scoring profiles: ", profile_path)
@@ -84,6 +98,7 @@ profiles <- jsonlite::fromJSON(profile_path, simplifyVector = FALSE)
 cache_matches <- function(cache) {
   is.list(cache) &&
     identical(cache$year, year) &&
+    identical(if (is.null(cache$week)) 0L else cache$week, week) &&
     identical(cache$sources, sources) &&
     identical(cache$positions, positions) &&
     is.list(cache$data)
@@ -119,16 +134,21 @@ if (refresh) {
     src = sources,
     pos = positions,
     season = year,
-    week = 0
+    week = week
   )
 
   missing_positions <- setdiff(positions, names(data_result))
   if (length(missing_positions) > 0L) {
     stop("No projection results for: ", paste(missing_positions, collapse = ", "))
   }
+  empty_positions <- positions[vapply(data_result[positions], nrow, integer(1)) == 0L]
+  if (length(empty_positions) > 0L) {
+    stop("Empty projection results for: ", paste(empty_positions, collapse = ", "))
+  }
 
   cache <- list(
     year = year,
+    week = week,
     sources = sources,
     positions = positions,
     created_at = format(Sys.time(), tz = "UTC", usetz = TRUE),
@@ -185,7 +205,25 @@ write_league <- function(league, profile) {
   if (!dir.exists(league_dir)) {
     stop("Missing league directory: ", league_dir)
   }
-  output_path <- file.path(league_dir, "raw.csv")
+  if (week > 0L) {
+    league_dir <- file.path(league_dir, "weekly_projections")
+    dir.create(league_dir, recursive = TRUE, showWarnings = FALSE)
+    weekday <- (as.integer(format(Sys.Date(), "%w")) + 6L) %% 7L
+    output_name <- sprintf("projections_%d_wk%d_d%d.csv", year, week, weekday)
+  } else {
+    output_name <- "raw.csv"
+  }
+  output_path <- file.path(league_dir, output_name)
+  required_positions <- intersect(positions, c("QB", "RB", "WR", "TE"))
+  if (week > 0L && !is.null(scoring$kick)) {
+    required_positions <- c(required_positions, "K")
+  }
+  if (week > 0L && !is.null(scoring$dst)) {
+    required_positions <- c(required_positions, "DST")
+  }
+  if (nrow(output) == 0L || !all(required_positions %in% output$position)) {
+    stop("Incomplete scored projections for ", league)
+  }
   utils::write.csv(output, output_path, row.names = FALSE, na = "")
   message(
     "Wrote ", nrow(output), " players to ", output_path,
