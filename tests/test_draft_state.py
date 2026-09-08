@@ -169,7 +169,9 @@ def test_configured_flex_eligibility_includes_tight_end(tmp_path):
     config["flex_positions"] = ["TE"]
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    session = DraftSession(tmp_path, 2026, "test", 1)
+    # With one turn left, the optimizer must fill this FLEX rather than
+    # considering a bench pick while postponing the final starter.
+    session = DraftSession(tmp_path, 2026, "test", 1, rounds=1)
     optimized = optimize_draft(session)
 
     assert session.public_state()["flex_positions"] == ["TE"]
@@ -850,3 +852,79 @@ def test_missing_platform_name_does_not_leak_external_id(tmp_path):
     assert result["unmatched"][0]["player"] == "Unknown player"
     browser_json = json.dumps(session.public_state())
     assert "private-player-identifier" not in browser_json
+
+
+def test_verified_opponent_reorder_is_atomic_and_preserves_roster(tmp_path):
+    make_league(tmp_path)
+    s = DraftSession(tmp_path, 2026, "test", 4)
+    for name in [
+        "Alpha Runner",
+        "Bravo Receiver Jr.",
+        "Charlie Passer",
+        "Delta Tight End",
+    ]:
+        s.add_pick(name, locked=True)
+    before = s.public_state()
+    corrections = [
+        {
+            "number": 1,
+            "expected_player": "Alpha Runner",
+            "player": "Bravo Receiver Jr.",
+        },
+        {
+            "number": 2,
+            "expected_player": "Bravo Receiver Jr.",
+            "player": "Alpha Runner",
+        },
+    ]
+    # Reject stale batches before changing any entries.
+    bad = [corrections[0], {**corrections[1], "expected_player": "Wrong"}]
+    with pytest.raises(DraftError, match="changed since"):
+        s.reorder_opponent_picks(bad)
+    assert s.public_state()["picks"] == before["picks"]
+    s.reorder_opponent_picks(corrections)
+    after = s.public_state()
+    assert after["current_pick"] == before["current_pick"]
+    assert after["roster"] == before["roster"]
+    assert {p["Player"] for p in after["players"]} == {
+        p["Player"] for p in before["players"]
+    }
+    assert [p["player"] for p in s.picks[:2]] == [
+        "Bravo Receiver Jr.",
+        "Alpha Runner",
+    ]
+    restored = DraftSession(tmp_path, 2026, "test", 4)
+    assert restored.picks == s.picks
+    # A stale retry cannot swap the names back.
+    with pytest.raises(DraftError, match="changed since"):
+        s.reorder_opponent_picks(corrections)
+    with pytest.raises(DraftError, match="your picks"):
+        s.reorder_opponent_picks(
+            [
+                {
+                    "number": 4,
+                    "expected_player": "Delta Tight End",
+                    "player": "Charlie Passer",
+                },
+                {
+                    "number": 3,
+                    "expected_player": "Charlie Passer",
+                    "player": "Delta Tight End",
+                },
+            ]
+        )
+    with pytest.raises(DraftError, match="preserve the drafted"):
+        s.reorder_opponent_picks(
+            [
+                {
+                    "number": 1,
+                    "expected_player": "Bravo Receiver Jr.",
+                    "player": "Echo Runner",
+                },
+                {
+                    "number": 2,
+                    "expected_player": "Alpha Runner",
+                    "player": "Bravo Receiver Jr.",
+                },
+            ]
+        )

@@ -10,6 +10,8 @@ let toastTimer = null;
 let lastSyncAt = null;
 let syncInFlight = false;
 let syncPollTimer = null;
+let syncConflicts = [];
+let lastConflictNotice = "";
 const liveSyncIntervalMs = 3000;
 const defaultChartSettings = {metric: "VOR_Points", yMin: null, yMax: null, limit: 18};
 let chartSettings = {...defaultChartSettings, ...JSON.parse(localStorage.getItem("draft-chart-settings") || "{}")};
@@ -53,9 +55,15 @@ function signedNumber(value) {
 
 function renderSyncStatus(error = false) {
   const syncBadge = $("#sync-badge");
+  syncBadge.title = "";
   if (error) {
     syncBadge.className = "status-dot error";
     syncBadge.textContent = "API offline — manual ready";
+  } else if (syncConflicts.length) {
+    syncBadge.className = "status-dot error";
+    syncBadge.textContent = `${syncConflicts.length} pick-order conflicts — review needed`;
+    syncBadge.title = syncConflicts.map((c) =>
+      `#${c.number}: local ${c.local}; ESPN ${c.platform}`).join("\n");
   } else if (state.simulate_api_down) {
     syncBadge.className = "status-dot error";
     syncBadge.textContent = "Simulated API outage — manual fallback";
@@ -136,6 +144,13 @@ function renderOutlook() {
 
 function renderPlayers() {
   const query = $("#search").value.trim().toLowerCase();
+  let metric = state.metric;
+  if (activePosition === "FLEX" && metric.startsWith("VOR_")) {
+    const flexMetric = `FLEX_${metric}`;
+    metric = state.players.some((player) =>
+      state.flex_positions.includes(player.Position) && Number.isFinite(player[flexMetric]))
+      ? flexMetric : metric.slice(4);
+  }
   const players = state.players.filter((player) => {
     const positionMatch = activePosition === "ALL"
       || player.Position === activePosition
@@ -143,16 +158,19 @@ function renderPlayers() {
     const queryMatch = !query || `${player.Player} ${player.Team}`.toLowerCase().includes(query);
     return positionMatch && queryMatch;
   });
+  if (activePosition === "FLEX") {
+    players.sort((a, b) => (b[metric] ?? -Infinity) - (a[metric] ?? -Infinity));
+  }
   $("#board-summary").textContent = `${players.length} shown · ${state.players.length} available`;
   $("#board-count").textContent = state.players.length;
-  $("#metric-heading").textContent = state.metric.replaceAll("_", " ");
+  $("#metric-heading").textContent = metric.replaceAll("_", " ");
   $("#players").innerHTML = players.slice(0, 250).map((player) => `
     <tr class="${player.Excluded ? "excluded-player" : ""}">
       <td><div class="player-name">${escapeHtml(player.Player)}</div><div class="player-team">${escapeHtml(player.Team)}</div></td>
       <td><span class="pos-pill pos-${escapeHtml(player.Position)}">${escapeHtml(player.Position)}</span></td>
       <td>${player.Bye ?? "—"}</td>
       <td>${formatNumber(player.ADP)}</td>
-      <td><strong>${formatNumber(player[state.metric])}</strong></td>
+      <td><strong>${formatNumber(player[metric])}</strong></td>
       <td><div class="player-actions"><button class="icon-button avoid-button" data-exclusion-player="${escapeHtml(player.Player)}" data-exclusion-state="${player.Excluded ? "false" : "true"}">${player.Excluded ? "Restore" : "Avoid"}</button><button class="button draft-button" data-draft="${escapeHtml(player.Player)}">Mark taken</button></div></td>
     </tr>`).join("");
   $("#player-options").innerHTML = state.players.map((player) =>
@@ -337,13 +355,14 @@ function renderOptimization() {
   const plan = optimization.plans[activePlan];
   results.className = "optimizer-results";
   results.innerHTML = `
-    <p class="plan-score">${optimization.metric.replaceAll("_", " ")}: ${formatNumber(plan.total)} · risk-adjusted ${formatNumber(plan.risk_adjusted_total)}</p>
+    <p class="plan-score">${optimization.bench_metric ? "Four-pick forecast · Starters: VOR Points · RB/WR bench: Ceiling" : `${optimization.metric.replaceAll("_", " ")}: ${formatNumber(plan.total)} · risk-adjusted ${formatNumber(plan.risk_adjusted_total)}`}</p>
+    <p class="log-meta">Availability estimates account for players still on the board; they are not guarantees.</p>
     <div class="plan-picks">${plan.selections.map((pick) => `
       <div class="plan-pick">
         <span class="pick-label">${pick.pick_label}</span>
         <span class="pos-pill pos-${escapeHtml(pick.position)}">${escapeHtml(pick.slot)}</span>
-        <span><strong>${escapeHtml(pick.player)}</strong><span class="log-meta"> ADP ${pick.adp ?? "—"}${pick.probability_source === "ffc" ? ` · FFC μ ${pick.probability_mean}, σ ${pick.probability_stdev}, n ${pick.probability_samples}` : " · saved ADP fallback"}${pick.backup ? ` · backup ${escapeHtml(pick.backup)}` : ""}</span></span>
-        <span class="probability">${Math.round(pick.probability * 100)}% avail.</span>
+        <span><strong>${escapeHtml(pick.player)}</strong><span class="log-meta"> ${escapeHtml((pick.value_metric || optimization.metric).replaceAll("_", " "))} ${formatNumber(pick.value)} · ADP ${pick.adp ?? "—"}${pick.probability_source === "ffc" ? ` · FFC μ ${pick.probability_mean}, σ ${pick.probability_stdev}, n ${pick.probability_samples}` : " · rough ADP fallback"}${pick.backup ? ` · backup ${escapeHtml(pick.backup)}` : ""}</span>${pick.following_pick != null ? `<span class="log-meta">If you wait to #${pick.following_pick}: ${Math.round(pick.wait_probability * 100)}% estimated available</span>` : ""}</span>
+        <span class="probability">${Math.round(pick.probability * 100)}% at #${pick.pick}</span>
         <button class="icon-button avoid-button" data-exclusion-player="${escapeHtml(pick.player)}" data-exclusion-state="true">Avoid</button>
       </div>`).join("")}</div>`;
   updateDeckLead();
@@ -382,7 +401,12 @@ function updateDeckLead() {
   const first = optimization?.plans?.[0]?.selections?.[0];
   if (first) {
     $("#deck-lead").textContent = first.player;
-    $("#deck-lead-detail").textContent = `${first.slot} at ${first.pick_label} · ${Math.round(first.probability * 100)}% available${first.backup ? ` · fallback ${first.backup}` : ""}`;
+    $("#deck-lead-detail").textContent = `${first.slot} at ${first.pick_label} · ${Math.round(first.probability * 100)}% available${first.following_pick != null ? ` · wait to #${first.following_pick}: ${Math.round(first.wait_probability * 100)}%` : ""}${first.backup ? ` · fallback ${first.backup}` : ""}`;
+    return;
+  }
+  if (optimization?.phase === "finish") {
+    $("#deck-lead").textContent = state.draft_complete ? "Draft complete" : "Final rounds";
+    $("#deck-lead-detail").textContent = optimization.message;
     return;
   }
   const recommendation = analysis?.recommended;
@@ -634,7 +658,7 @@ $("#metric").addEventListener("change", async (event) => {
 });
 
 $("#sync-button").addEventListener("click", async () => {
-  if (syncInFlight) return toast("A Sleeper sync is already running.");
+  if (syncInFlight) return toast("A draft sync is already running.");
   const button = $("#sync-button");
   syncInFlight = true;
   button.disabled = true;
@@ -643,6 +667,7 @@ $("#sync-button").addEventListener("click", async () => {
     const payload = await request("/api/sync", {method: "POST", body: "{}"});
     state = payload.state;
     lastSyncAt = new Date().toISOString();
+    syncConflicts = payload.conflicts || [];
     await afterStateChange();
     renderSyncStatus();
     if (payload.conflicts.length || payload.unmatched.length) {
@@ -699,10 +724,17 @@ async function pollLiveDraft() {
   try {
     const payload = await request("/api/sync", {method: "POST", body: "{}"});
     lastSyncAt = new Date().toISOString();
+    syncConflicts = payload.conflicts || [];
+    const conflictNotice = JSON.stringify(syncConflicts);
+    if (syncConflicts.length && conflictNotice !== lastConflictNotice) {
+      toast(`Pick order differs from ESPN at #${syncConflicts.map((c) => c.number).join(", #")}. Hover the sync badge for details.`, true);
+    }
+    lastConflictNotice = conflictNotice;
     renderSyncStatus();
     const draftChanged = (
       payload.state.current_pick !== state.current_pick
       || payload.state.picks.length !== state.picks.length
+      || JSON.stringify(payload.state.picks) !== JSON.stringify(state.picks)
     );
     if (draftChanged) {
       const previousPick = state.current_pick;

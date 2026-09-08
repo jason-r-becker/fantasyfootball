@@ -164,3 +164,55 @@ def test_network_binding_requires_explicit_opt_in():
     )
     assert args.host == "0.0.0.0"
     assert args.allow_network is True
+
+
+def test_reader_provenance_numbering_and_conflicts_reach_browser(
+    tmp_path, monkeypatch
+):
+    from fantasyfootball import draft_app
+
+    session = make_session(tmp_path)
+    monkeypatch.setattr(draft_app, "fetch_platform_picks", lambda *args: [])
+    monkeypatch.setattr(
+        draft_app, "fetch_platform_team_names", lambda *args: {}
+    )
+    server = DraftHTTPServer(("127.0.0.1", 0), session)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with pytest.raises(HTTPError):
+            request_json(
+                url,
+                "/api/picks",
+                {"player": "Alpha Runner", "source": "ESPN tab reader"},
+            )
+        _, added = request_json(
+            url,
+            "/api/picks",
+            {
+                "player": "Alpha Runner",
+                "number": 1,
+                "mine": False,
+                "source": "ESPN tab reader",
+            },
+        )
+        assert (
+            added["pick"]["mine"] is True
+        )  # Ownership comes from pick number.
+        assert added["pick"]["source"] == "ESPN tab reader"
+        assert added["pick"]["locked"] is False
+        conflicts = [
+            {"number": 1, "local": "Alpha Runner", "platform": "Other"}
+        ]
+        request_json(url, "/api/bridge/report", {"conflicts": conflicts})
+        _, result = request_json(url, "/api/sync", {})
+        assert result["conflicts"] == conflicts
+        assert session.picks[0]["player"] == "Alpha Runner"
+        request_json(url, "/api/bridge/report", {"conflicts": []})
+        _, result = request_json(url, "/api/sync", {})
+        assert result["conflicts"] == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

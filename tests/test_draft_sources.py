@@ -124,3 +124,56 @@ def test_espn_fetch_does_not_expose_upstream_error_text(monkeypatch):
     assert cookie_value not in str(captured.value)
     assert "private-swid" not in str(captured.value)
     assert "Check the league ID" in str(captured.value)
+
+
+def test_espn_team_labels_follow_draft_order_and_prefer_owner_names():
+    payload = {
+        "members": [
+            {"id": "a", "displayName": "Owner A"},
+            {"id": "b", "firstName": "Owner", "lastName": "B"},
+        ],
+        "teams": [
+            {"id": 9, "name": "Nine", "owners": ["a"]},
+            {"id": 3, "name": "Three", "owners": ["b"]},
+            {"id": 5, "name": "Five", "owners": ["unknown"]},
+        ],
+        "settings": {"draftSettings": {"pickOrder": [3, 9, 5]}},
+    }
+    assert draft_sources.parse_espn_team_names(payload) == {
+        1: "Owner B · Three",
+        2: "Owner A · Nine",
+        3: "Five",
+    }
+    payload["settings"] = {}
+    payload["draftDetail"] = {
+        "picks": [
+            {"roundId": 1, "roundPickNumber": 2, "teamId": 9, "playerId": -1},
+            {"roundId": 2, "roundPickNumber": 2, "teamId": 3, "playerId": -1},
+        ]
+    }
+    assert draft_sources.parse_espn_team_names(payload) == {
+        2: "Owner A · Nine"
+    }
+    payload["draftDetail"] = {}
+    assert draft_sources.parse_espn_team_names(payload) == {}
+
+
+def test_espn_team_name_fetch_uses_read_only_metadata(monkeypatch):
+    class FakeRequests:
+        def league_get(self, params):
+            assert params == {"view": ["mTeam", "mSettings", "mDraftDetail"]}
+            return {
+                "teams": [{"id": 5, "name": "My team"}],
+                "settings": {"draftSettings": {"pickOrder": [5]}},
+            }
+
+    class FakeLeague:
+        def __init__(self, **kwargs):
+            assert kwargs["fetch_league"] is False
+            assert kwargs["year"] == 2026
+            self.espn_request = FakeRequests()
+
+    monkeypatch.setattr(draft_sources, "League", FakeLeague)
+    assert draft_sources.fetch_platform_team_names(
+        {"site": "ESPN", "league_id": "123"}, 2026
+    ) == {1: "My team"}

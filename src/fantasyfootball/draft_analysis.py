@@ -531,9 +531,20 @@ def _availability_estimate(
         or distribution.stdev is None
         or distribution.stdev <= 0
     ):
+        probability = legacy_probability(
+            player.get("ADP"), pick, session.teams
+        )
+        current = legacy_probability(
+            player.get("ADP"), session.current_pick, session.teams
+        )
         return {
-            "probability": _probability_available(
-                player.get("ADP"), pick, session.teams
+            "probability": 1.0
+            if pick <= session.current_pick
+            else round(
+                min(1.0, probability / current)
+                if current > 0 and not pd.isna(player.get("ADP"))
+                else probability,
+                3,
             ),
             "probability_source": "saved-adp-fallback",
             "probability_mean": None,
@@ -545,6 +556,19 @@ def _availability_estimate(
         pick,
         fallback_adp=player.get("ADP"),
         teams=session.teams,
+    )
+    current = modeled_probability_available(
+        distribution,
+        session.current_pick,
+        fallback_adp=player.get("ADP"),
+        teams=session.teams,
+    )
+    probability = (
+        1.0
+        if pick <= session.current_pick
+        else min(1.0, probability / current)
+        if current > 0
+        else probability
     )
     return {
         "probability": round(probability, 3),
@@ -559,11 +583,27 @@ def _availability_estimate(
     }
 
 
+def _optimizer_value_key(slot: str) -> str:
+    return {"BENCH": "_bench_value", "FLEX": "_flex_value"}.get(slot, "_value")
+
+
+def _role_eligible(player, slot, outstanding, session):
+    # A player fills an open dedicated position before FLEX. Other slot
+    # orders evaluate taking that position first, preserving scarce players
+    # for dedicated slots rather than greedily consuming them in FLEX.
+    if slot == "FLEX":
+        return player["Position"] not in outstanding
+    if slot == "BENCH":
+        return _bench_eligible(player, outstanding, session)
+    return True
+
+
 def _simulate_plan(
     session: DraftSession,
     pool: dict[str, Any],
     slots: tuple[str, ...],
     targets: list[int],
+    first_choice: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     unavailable: set[str] = set()
     adp_cursor = 0
@@ -571,6 +611,7 @@ def _simulate_plan(
     previous_pick = session.current_pick - 1
     total = 0.0
     risk_adjusted_total = 0.0
+    outstanding = list(pool.get("starter_slots", slots))
 
     for slot, target in zip(slots, targets, strict=True):
         picks_before = target - previous_pick - 1
@@ -587,9 +628,16 @@ def _simulate_plan(
                 player
                 for player in pool["by_slot"][slot]
                 if player["_key"] not in unavailable
+                and _role_eligible(player, slot, outstanding, session)
             ),
             None,
         )
+        if not selections and first_choice is not None:
+            choice = first_choice
+            if choice["_key"] in unavailable:
+                return None
+            if not _role_eligible(choice, slot, outstanding, session):
+                return None
         if choice is None:
             return None
         backup = next(
@@ -599,12 +647,19 @@ def _simulate_plan(
                 if player["_key"] not in unavailable
                 and player["_key"] != choice["_key"]
                 and player["_adp"] >= target
+                and _role_eligible(player, slot, outstanding, session)
             ),
             None,
         )
-        value = choice["_value"]
-        backup_value = value if backup is None else backup["_value"]
-        availability = _availability_estimate(session, choice, target)
+        value_key = _optimizer_value_key(slot)
+        value = choice[value_key]
+        backup_value = min(0.0, value) if backup is None else backup[value_key]
+        cache_key = (choice["_key"], target)
+        if cache_key not in pool["availability"]:
+            pool["availability"][cache_key] = _availability_estimate(
+                session, choice, target
+            )
+        availability = pool["availability"][cache_key]
         probability = availability["probability"]
         risk_adjusted = probability * value + (1 - probability) * backup_value
         round_number, offset = divmod(target - 1, session.teams)
@@ -622,6 +677,11 @@ def _simulate_plan(
                 if pd.isna(choice.get("ADP"))
                 else round(float(choice["ADP"]), 1),
                 "value": round(value, 2),
+                "value_metric": "Ceiling"
+                if slot == "BENCH"
+                else pool["flex_metric"]
+                if slot == "FLEX"
+                else pool["starter_metric"],
                 **availability,
                 "backup": None if backup is None else str(backup["Player"]),
             }
@@ -629,6 +689,8 @@ def _simulate_plan(
         total += value
         risk_adjusted_total += risk_adjusted
         unavailable.add(choice["_key"])
+        if slot in outstanding:
+            outstanding.remove(slot)
         previous_pick = target
 
     return {
@@ -641,6 +703,10 @@ def _simulate_plan(
 def _prepare_optimizer_pool(
     available: pd.DataFrame, metric: str, session: DraftSession
 ) -> dict[str, Any]:
+    flex_metric = f"FLEX_{metric}" if metric.startswith("VOR_") else metric
+    if flex_metric not in available.columns:
+        raw_metric = metric.removeprefix("VOR_")
+        flex_metric = raw_metric if raw_metric in available.columns else metric
     records = []
     for raw in available.to_dict("records"):
         if pd.isna(raw.get(metric)):
@@ -649,6 +715,8 @@ def _prepare_optimizer_pool(
         player["_key"] = normalize_player_name(str(player["Player"]))
         player["_adp"] = _expected_adp(player, session)
         player["_value"] = float(player[metric])
+        player["_flex_value"] = _numeric_value(player, flex_metric)
+        player["_bench_value"] = _numeric_value(player, "Ceiling")
         records.append(player)
     by_slot = {}
     for slot in (*POSITIONS, "FLEX"):
@@ -659,13 +727,122 @@ def _prepare_optimizer_pool(
                 for player in records
                 if player.get("Position") in eligible
             ),
-            key=lambda player: player["_value"],
+            key=lambda player: player[_optimizer_value_key(slot)],
             reverse=True,
         )
     return {
         "by_adp": sorted(records, key=lambda player: player["_adp"]),
         "by_slot": by_slot,
+        "availability": {},
+        "starter_metric": metric,
+        "flex_metric": flex_metric,
     }
+
+
+def _bench_eligible(player, outstanding, session):
+    position = player["Position"]
+    return position not in outstanding and not (
+        "FLEX" in outstanding and position in session.flex_positions
+    )
+
+
+def _late_draft_plans(session, available, slots, own_picks, max_plans):
+    """Bounded four-pick search; no bench search during early rounds."""
+    pool = _prepare_optimizer_pool(available, "VOR_Points", session)
+    pool["starter_slots"] = slots
+    pool["by_slot"]["BENCH"] = sorted(
+        (
+            p
+            for p in pool["by_adp"]
+            if p["Position"] in {"RB", "WR"} and not pd.isna(p.get("Ceiling"))
+        ),
+        key=lambda p: p["_bench_value"],
+        reverse=True,
+    )
+    targets = own_picks[:4]
+    first_pool = _projected_pool(
+        pool["by_adp"], max(0, targets[0] - session.current_pick), session
+    )
+    first_keys = {p["_key"] for p in first_pool}
+    choices = sorted(set(slots + ["BENCH"]))
+    plans = []
+    seen = set()
+    # Compare gains over players projected to remain later, so an open QB
+    # slot can wait while a scarce bench target is secured. All plans use the
+    # same baseline per role; raw ceiling does not swamp starter VOR values.
+    later_pool = _projected_pool(
+        pool["by_adp"], max(0, own_picks[-1] - session.current_pick), session
+    )
+    later_keys = {p["_key"] for p in later_pool}
+    baselines = {}
+    for slot in choices:
+        key = _optimizer_value_key(slot)
+        candidates = pool["by_slot"][slot]
+        later = [p[key] for p in candidates if p["_key"] in later_keys]
+        baselines[slot] = max(
+            later, default=min((p[key] for p in candidates), default=0)
+        )
+    for order in itertools.product(choices, repeat=len(targets)):
+        if any(order.count(slot) > slots.count(slot) for slot in set(slots)):
+            continue
+        unfilled = len(slots) - sum(slot != "BENCH" for slot in order)
+        if unfilled > len(own_picks) - len(targets):
+            continue
+        # At most 12 first candidates x 81 orders, independent of draft length.
+        first_candidates = [
+            p
+            for p in pool["by_slot"][order[0]]
+            if p["_key"] in first_keys
+            and _role_eligible(p, order[0], slots, session)
+        ]
+        for first in first_candidates[:12]:
+            plan = _simulate_plan(session, pool, order, targets, first)
+            if plan is None:
+                continue
+            identity = tuple(
+                (p["slot"], p["player"]) for p in plan["selections"]
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            plan["slot_order"] = list(order)
+            plan["decision_score"] = round(
+                plan["risk_adjusted_total"] - sum(baselines[s] for s in order),
+                2,
+            )
+            plans.append(plan)
+    plans.sort(
+        key=lambda p: (p["decision_score"], p["risk_adjusted_total"]),
+        reverse=True,
+    )
+    # Distinct first-pick alternatives are more useful than repeated plans.
+    result = []
+    first_names = set()
+    for plan in plans:
+        name = plan["selections"][0]["player"]
+        if name not in first_names:
+            result.append(plan)
+            first_names.add(name)
+        if len(result) == max_plans:
+            break
+    return result
+
+
+def _add_wait_odds(session, plans, own_picks, available):
+    lookup = {str(p["Player"]): p for p in available.to_dict("records")}
+    for plan in plans:
+        for selection in plan["selections"]:
+            following = next(
+                (p for p in own_picks if p > selection["pick"]), None
+            )
+            selection["following_pick"] = following
+            selection["wait_probability"] = (
+                None
+                if following is None
+                else _availability_estimate(
+                    session, lookup[selection["player"]], following
+                )["probability"]
+            )
 
 
 def optimize_draft(
@@ -673,17 +850,59 @@ def optimize_draft(
 ) -> dict[str, Any]:
     """Project the strongest remaining starter builds at future own picks."""
     slots = _starter_slots_remaining(session)
-    targets = _own_picks(session)[: len(slots)]
-    if not slots:
+    own_picks = _own_picks(session)
+    reserved = session.config.get("late_round_positions", [])
+    if not isinstance(reserved, list) or any(
+        p not in {"DST", "K"} for p in reserved
+    ):
+        raise DraftError("late_round_positions must contain DST and/or K.")
+    offensive_picks = [
+        p
+        for p in own_picks
+        if (p - 1) // session.teams < session.rounds - len(reserved)
+    ]
+    if not offensive_picks:
+        taken = {p.get("position") for p in session.picks if p.get("mine")}
+        remaining = [p for p in reserved if p not in taken]
         return {
             "metric": session.metric,
-            "slots_remaining": [],
+            "slots_remaining": slots,
             "plans": [],
-            "message": "Your configured starting lineup is already filled.",
+            "phase": "finish",
+            "message": (
+                "Your draft is complete."
+                if not own_picks
+                else "Final rounds: draft "
+                + " and ".join("D/ST" if p == "DST" else p for p in remaining)
+                + ". Choose on your draft platform, then sync or record "
+                "with + D/ST / + K."
+            )
+            if remaining or not own_picks
+            else "Your reserved D/ST and K picks are filled.",
         }
+    available = _available_frame(session)
+    if len(slots) <= 2:
+        plans = _late_draft_plans(
+            session, available, slots, offensive_picks, max_plans
+        )
+        _add_wait_odds(session, plans, own_picks, available)
+        return {
+            "metric": "VOR_Points",
+            "bench_metric": "Ceiling",
+            "phase": "bench" if not slots else "transition",
+            "slots_remaining": slots,
+            "plans": plans,
+            "message": (
+                "Four-pick forecast · starters: VOR Points · RB/WR bench: "
+                "Ceiling · estimates account for players still available."
+                if plans
+                else "No feasible four-pick plan remains. "
+                "Review the board and remaining starter needs."
+            ),
+        }
+    targets = offensive_picks[: len(slots)]
     if len(targets) < len(slots):
         slots = slots[: len(targets)]
-    available = _available_frame(session)
     pool = _prepare_optimizer_pool(available, session.metric, session)
     unique_orders = sorted(set(itertools.permutations(slots)))
     plans = []
@@ -699,9 +918,10 @@ def optimize_draft(
         plan["slot_order"] = list(order)
         plans.append(plan)
     plans.sort(
-        key=lambda plan: (plan["total"], plan["risk_adjusted_total"]),
+        key=lambda plan: (plan["risk_adjusted_total"], plan["total"]),
         reverse=True,
     )
+    _add_wait_odds(session, plans[:max_plans], own_picks, available)
     return {
         "metric": session.metric,
         "slots_remaining": slots,

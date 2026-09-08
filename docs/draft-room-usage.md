@@ -69,12 +69,54 @@ platform.
 
 ## Use the analysis
 
+Live sync reports pick-order disagreements in the sync badge, with the
+conflicting pick numbers and names available on hover. Manual corrections
+remain protected. ESPN tab-reader imports retain their source and require
+explicit overall pick numbers; they do not become manual overrides.
+Verified opponent order corrections can be applied together through
+`POST /api/picks/reorder`, using `number`, `expected_player`, and `player`
+for each entry in `corrections`. This operation rejects stale entries,
+changes to your picks, and changes to the set of drafted players.
+Rankings refresh when recorded picks change, even if the draft clock stays
+at the same pick.
+
 The board ranks the available pool by the selected metric. The default is
 `VOR_Points`; changing the board metric also changes the optimizer metric.
 
 The **FLEX** board and optimizer use the config's `flex_positions`; older
 configs without that field retain the RB/WR-only behavior. K and DST are not
 optimized.
+
+The FLEX board and optimizer use `FLEX_VOR_Points` (or the corresponding selected VOR
+metric), comparing all eligible positions against a shared replacement
+baseline. Dedicated slots retain positional VOR. The forecast compares
+pick orders as the ADP pool depletes, so scarcity depends on the alternatives
+expected at later turns. A player fills an open dedicated position before
+FLEX; this prevents the FLEX choice from greedily consuming a needed starter.
+A second TE can still be the best FLEX selection after the TE slot is filled.
+The FLEX board sorts and displays that shared value. Older rankings without
+FLEX VOR columns fall back to raw projected points for the selected metric.
+
+The early optimizer searches starters only. At two or fewer open offensive
+starter slots it switches to a fixed horizon of at most four upcoming own
+picks, scoring starters with `VOR_Points` and RB/WR bench players with
+`Ceiling`. It compares role orders and up to 12 first-player alternatives per
+order, rather than searching the full remaining roster. A player who can
+fill an open starting slot is treated as a starter before becoming bench
+depth. Mixed plans compare gains over later projected replacement options,
+so raw bench ceiling totals do not automatically outweigh starter value.
+
+Each planned pick shows estimated availability at that pick and at the
+following own pick if you wait. Estimates condition FFC distributions on the
+player still being available now; saved ADP is a rough fallback. Opponent
+picks are still approximated by ADP order, so this is a bounded forecast,
+not a guarantee or a full simulation of opponent rosters.
+
+Set `"late_round_positions": ["DST", "K"]` in a league's `config.json` to
+reserve its final two rounds. Use `["DST"]` for a defense-only final round;
+the default `[]` reserves no rounds. During reserved rounds the optimizer
+shows a reminder to choose on the platform and sync or use the manual
+K/DST buttons. It does not rank or submit these selections.
 
 The projected-team optimizer runs automatically on your turns. After any run
 completes in under 500 ms, it switches to automatic calculation after every

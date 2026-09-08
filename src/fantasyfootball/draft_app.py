@@ -27,7 +27,7 @@ from fantasyfootball.draft_sources import (
 from fantasyfootball.draft_state import DraftError, DraftSession
 from fantasyfootball.utils import root
 
-TEAM_NAMES_FORMAT = "platform_display_name_v1"
+TEAM_NAMES_FORMAT = "platform_display_name_v2"
 
 
 class DraftRequestHandler(BaseHTTPRequestHandler):
@@ -145,18 +145,37 @@ class DraftRequestHandler(BaseHTTPRequestHandler):
         try:
             body = self._body()
             if path == "/api/picks":
+                from_reader = body.get("source") == "ESPN tab reader"
+                if from_reader and body.get("number") is None:
+                    raise DraftError(
+                        "ESPN reader picks require an explicit number."
+                    )
                 pick = self.server.session.add_pick(
                     str(body.get("player", "")),
                     number=body.get("number"),
-                    mine=body.get("mine"),
-                    locked=True,
+                    mine=None if from_reader else body.get("mine"),
+                    source="ESPN tab reader" if from_reader else "manual",
+                    locked=not from_reader,
                 )
                 self._json(
                     {"pick": pick, "state": self.server.session.public_state()}
                 )
+            elif path == "/api/picks/reorder":
+                self.server.session.reorder_opponent_picks(
+                    body.get("corrections", [])
+                )
+                self._json({"state": self.server.session.public_state()})
+            elif path == "/api/bridge/report":
+                conflicts = body.get("conflicts", [])
+                if not isinstance(conflicts, list):
+                    raise DraftError("Bridge conflicts must be a list.")
+                self.server.bridge_conflicts = conflicts
+                self._json({"ok": True})
             elif path == "/api/picks/untracked":
                 pick = self.server.session.add_untracked_pick(
-                    str(body.get("position", "")), mine=body.get("mine")
+                    str(body.get("position", "")),
+                    number=body.get("number"),
+                    mine=body.get("mine"),
                 )
                 self._json(
                     {"pick": pick, "state": self.server.session.public_state()}
@@ -174,12 +193,18 @@ class DraftRequestHandler(BaseHTTPRequestHandler):
                     return
                 remote = fetch_platform_picks(session.config, session.year)
                 result = session.reconcile_platform_picks(remote)
+                result["conflicts"].extend(
+                    getattr(self.server, "bridge_conflicts", [])
+                )
                 if session.state.get("team_names_format") != TEAM_NAMES_FORMAT:
                     try:
-                        session.set_team_names(
-                            fetch_platform_team_names(session.config),
-                            format_name=TEAM_NAMES_FORMAT,
+                        names = fetch_platform_team_names(
+                            session.config, session.year
                         )
+                        if names:
+                            session.set_team_names(
+                                names, format_name=TEAM_NAMES_FORMAT
+                            )
                     except DraftError:
                         # Pick sync is the critical path. Generic slot labels
                         # remain usable if optional owner metadata is offline.

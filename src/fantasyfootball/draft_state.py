@@ -39,7 +39,9 @@ DISPLAY_COLUMNS = [
     "Floor",
     "Points",
     "Ceiling",
+    "FLEX_VOR_Floor",
     "FLEX_VOR_Points",
+    "FLEX_VOR_Ceiling",
     "Std Dev",
 ]
 METRICS = ("VOR_Floor", "VOR_Points", "VOR_Ceiling", "Points", "Ceiling")
@@ -586,6 +588,60 @@ class DraftSession:
                 )
             except Exception:
                 self.state["picks"].append(old)
+                raise
+
+    def reorder_opponent_picks(
+        self, corrections: list[dict[str, Any]]
+    ) -> None:
+        """Apply a verified permutation without exposing intermediate gaps."""
+        if not isinstance(corrections, list) or len(corrections) < 2:
+            raise DraftError("Provide at least two pick corrections.")
+        with self._lock:
+            existing = {p["number"]: p for p in self.picks}
+            replacements = {}
+            for correction in corrections:
+                number = int(correction["number"])
+                old = existing.get(number)
+                if not old or number in replacements:
+                    raise DraftError(
+                        "Correction has a missing or repeated pick."
+                    )
+                if old.get("mine") or self.is_my_pick(number):
+                    raise DraftError(
+                        "Opponent reorder cannot change your picks."
+                    )
+                if old["player"] != correction.get("expected_player"):
+                    raise DraftError(
+                        "Pick changed since the correction was prepared."
+                    )
+                canonical = self._canonical_name(correction.get("player", ""))
+                if not canonical or not old.get("matched", True):
+                    raise DraftError("Reorder requires matched players.")
+                replacements[number] = canonical
+            if sorted(replacements.values()) != sorted(
+                existing[n]["player"] for n in replacements
+            ):
+                raise DraftError(
+                    "Reorder must preserve the drafted player set."
+                )
+            before = self.state["picks"]
+            self.state["picks"] = [
+                {
+                    **p,
+                    "player": replacements[p["number"]],
+                    "source": "verified order correction",
+                    "locked": True,
+                    "external_id": None,
+                    "recorded_at": _now(),
+                }
+                if p["number"] in replacements
+                else p
+                for p in before
+            ]
+            try:
+                self._persist()
+            except Exception:
+                self.state["picks"] = before
                 raise
 
     def undo_pick(self, number: int) -> dict[str, Any]:

@@ -215,8 +215,70 @@ def fetch_platform_picks(
     )
 
 
-def fetch_platform_team_names(config: dict[str, Any]) -> dict[int, str]:
+def parse_espn_team_names(payload: dict[str, Any]) -> dict[int, str]:
+    """Map draft slots, not ESPN team IDs, to owner and team labels."""
+    members = {str(m["id"]): m for m in payload.get("members", [])}
+    teams = {int(t["id"]): t for t in payload.get("teams", [])}
+    order = (payload.get("settings", {}).get("draftSettings") or {}).get(
+        "pickOrder"
+    ) or []
+    slot_teams = dict(enumerate(order, 1))
+    if not slot_teams:
+        for pick in (payload.get("draftDetail") or {}).get("picks", []):
+            if pick.get("roundId") == 1 and pick.get("teamId") is not None:
+                slot_teams[int(pick["roundPickNumber"])] = pick["teamId"]
+    names = {}
+    for slot, team_id in slot_teams.items():
+        team = teams.get(int(team_id), {})
+        team_name = (
+            team.get("name")
+            or " ".join(
+                str(team.get(k) or "") for k in ("location", "nickname")
+            ).strip()
+        )
+        owners = []
+        for owner_id in team.get("owners", []):
+            member = members.get(str(owner_id), {})
+            owner = (
+                member.get("displayName")
+                or " ".join(
+                    str(member.get(k) or "") for k in ("firstName", "lastName")
+                ).strip()
+            )
+            if owner and owner not in owners:
+                owners.append(owner)
+        owner_name = " / ".join(owners)
+        label = " · ".join(
+            dict.fromkeys(name for name in (owner_name, team_name) if name)
+        )
+        if label:
+            names[slot] = label
+    return names
+
+
+def fetch_espn_team_names(config: dict[str, Any], year: int) -> dict[int, str]:
+    try:
+        league = League(
+            league_id=int(config["league_id"]),
+            year=year,
+            swid=config.get("swid"),
+            espn_s2=config.get("espn_s2"),
+            fetch_league=False,
+        )
+        payload = league.espn_request.league_get(
+            params={"view": ["mTeam", "mSettings", "mDraftDetail"]}
+        )
+        return parse_espn_team_names(payload)
+    except Exception as error:
+        raise DraftError("ESPN team metadata request failed.") from error
+
+
+def fetch_platform_team_names(
+    config: dict[str, Any], year: int | None = None
+) -> dict[int, str]:
     """Return stable draft-slot labels when the platform exposes them."""
     if str(config.get("site", "")).upper() == "SLEEPER":
         return fetch_sleeper_team_names(config)
+    if str(config.get("site", "")).upper() == "ESPN" and year is not None:
+        return fetch_espn_team_names(config, year)
     return {}
